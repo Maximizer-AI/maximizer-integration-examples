@@ -1,0 +1,19 @@
+{
+  "call_id": "DEMO-CALL-0001",
+  "upload_file_name": "claims/demo_call_0001.wav",
+  "results_file_name": "claims/demo_call_0001.json",
+  "status": "processed",
+  "message_timestamp": "2026-01-01T12:00:00Z",
+  "summary": {
+    "title": "Summary",
+    "value": "Synthetic demo result only. No real customer, agent, or call data."
+  },
+  "caller_name": {
+    "title": "Caller name",
+    "value": "Demo Caller"
+  },
+  "call_type": {
+    "title": "Call type",
+    "value": [["Demo"]]
+  }
+}
