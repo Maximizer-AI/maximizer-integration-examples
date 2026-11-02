@@ -4,9 +4,9 @@ Set MAXIMIZER_UPLOAD_FUNCTION only when the supplied configuration enables this
 transport. Admission credentials intentionally cannot write directly to S3.
 """
 import json
+import hashlib
 import os
 import time
-import uuid
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -21,18 +21,24 @@ class AdmittedUploads:
         return getattr(self.s3, name)
 
     def invoke(self, event):
-        response = self.invoke_client.invoke(FunctionName=self.function_name,
-            InvocationType='RequestResponse', Payload=json.dumps(event).encode())
-        if response.get('FunctionError'):
-            raise RuntimeError('Upload admission service failed; no direct upload was attempted')
-        result = json.loads(response['Payload'].read())
-        if result.get('status') != 200:
+        payload = json.dumps(event).encode()
+        for attempt in range(3):
+            response = self.invoke_client.invoke(FunctionName=self.function_name,
+                InvocationType='RequestResponse', Payload=payload)
+            if response.get('FunctionError'):
+                raise RuntimeError('Upload admission service failed; no direct upload was attempted')
+            result = json.loads(response['Payload'].read())
+            if result.get('status') == 200:
+                return result
             # Print only stable error fields. Responses can otherwise contain
             # temporary signed transfer URLs, which must not enter logs.
             status, code = result.get('status'), result.get('error', 'admission_failed')
             retry = result.get('retry_after')
+            transient = status == 503 or (status == 409 and code == 'request_in_progress')
+            if transient and attempt < 2 and type(retry) is int and 1 <= retry <= 10:
+                time.sleep(retry)
+                continue
             raise RuntimeError(f'Upload admission rejected: {status} {code}' + (f'; retry after {retry}s' if retry else ''))
-        return result
 
     @staticmethod
     def put(url, data):
@@ -49,9 +55,17 @@ class AdmittedUploads:
             time.sleep(attempt + 1)
 
     def upload_file(self, filename, bucket, key):
-        request_id = uuid.uuid4().hex
         size = os.path.getsize(filename)
+        # Stable for this exact file and destination, so restarting the same
+        # command after a network outage resumes instead of reserving again.
+        digest = hashlib.sha256(f'maximizer-upload-v1\0{bucket}\0{key}\0{size}\0'.encode())
+        with open(filename, 'rb') as stream:
+            for chunk in iter(lambda: stream.read(8 * 1024 ** 2), b''):
+                digest.update(chunk)
+        request_id = digest.hexdigest()[:32]
         result = self.invoke({'operation': 'start', 'request_id': request_id, 'key': key, 'size': size})
+        if result.get('completed') is True:
+            return
         parts = result.get('parts', [])
         if not parts or result.get('request_id') != request_id or sum(p['size'] for p in parts) != size:
             raise RuntimeError('Invalid reserved upload plan')
