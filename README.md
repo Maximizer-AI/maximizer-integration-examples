@@ -69,8 +69,11 @@ directly. It is never published here.
 The clients check that metadata is one JSON object of at most 1 MiB, with no
 duplicate keys, `NaN`, or `Infinity`. A UTF-8 BOM is tolerated. `ucid` must
 match the call id argument. `audio_files` must list the uploaded filenames
-without folders, exactly in part order. If the file is refused, the call is
-held until a corrected file arrives under the same name.
+without folders, exactly in part order. With direct-ingest credentials, a call
+rejected during processing can wait for a corrected file under the same name.
+[Admission-enabled uploads](#admission-enabled-uploads-python) keep reserved
+filenames immutable; changing an admitted file requires a fresh UCID and the
+metadata updates described there.
 
 ### The daily org file and users list
 
@@ -135,7 +138,7 @@ for an upload test.
 ### Upload the demo
 
 1. Clone or download this repository. Run the commands from its root folder.
-2. Install the Python dependency: `python3 -m pip install boto3`.
+2. Use Python 3.10 or later and install `boto3`: `python3 -m pip install boto3`.
 3. Set the [AWS environment variables](#running-the-examples), including
    `MAXIMIZER_METADATA_SUFFIX` to the full metadata ending agreed at onboarding.
    The demo's local filename, `metadata.json`, does not supply that ending.
@@ -182,7 +185,8 @@ export MAXIMIZER_RESULTS_QUEUE_URL='<queue-url>'
 export MAXIMIZER_METADATA_SUFFIX='<metadata-file-suffix-agreed-at-onboarding>'
 ```
 
-Install `boto3` for Python. For a complete example with included files, follow
+The AWS Python examples require Python 3.10 or later and `boto3`. For a complete
+example with included files, follow
 [Upload the demo](#upload-the-demo). The CLI signatures are:
 
 ```text
@@ -208,9 +212,21 @@ new test, and do not log or share transfer URLs.
 
 A quota rejection reports `429` and a retry delay. Wait for that delay before
 starting another upload. Network retries of a reserved part reuse its existing
-reservation. Restarting the exact same command and unchanged file resumes its
-reservation while it is valid, or reuses an already completed upload. The
-client never falls back to direct S3 on admission failure.
+reservation. Restarting the exact same command and unchanged file resumes a
+valid reserved transfer. If the service already confirmed completion, the
+command skips the file transfer.
+
+An incomplete reservation lasts 15 minutes. A request that never received a
+transfer reservation may remain unrecoverable after an uncertain service
+failure. Expired or unrecoverable incomplete requests need a fresh UCID; their
+filenames stay reserved even if no file was stored. Changed or corrected file
+contents also need a fresh UCID. Pass that new UCID to the command, update the
+metadata's `ucid` and `audio_files` to its new uploaded filenames in part order,
+and rename any UCID-named metadata file accordingly. See
+[call-id naming](#call-id-naming-mode). Contact Maximizer with the UCID if
+completion is unclear before replacing an uncertain upload.
+
+The client never falls back to direct S3 on admission failure.
 Temporary service failures and in-progress reservations get at most two short
 retries using the same request; quota and filename-conflict rejections do not.
 Results still use the configured S3 polling or SQS notification flow.
@@ -236,14 +252,25 @@ JavaScript and Java accept the same arguments, in the same order:
 
 ```bash
 node aws/javascript/upload_and_fetch.mjs --ucid category_a call001 ./metadata.json ./call.wav
-java UploadAndFetch --ucid category_a call001 ./metadata.json ./call.wav
+mvn -f aws/java/pom.xml compile exec:java -Dexec.args="--ucid category_a call001 ./metadata.json ./call.wav"
 ```
 
 JavaScript requires `@aws-sdk/client-s3`, `@aws-sdk/client-sqs`, and
-`@aws-sdk/lib-storage`. Java requires a JDK supporting `Files.readString`,
-AWS SDK v2 modules `software.amazon.awssdk:s3` and `software.amazon.awssdk:sqs`,
-and `com.fasterxml.jackson.core:jackson-databind` with its transitive
-dependencies. Compile and run with these dependencies on the classpath.
+`@aws-sdk/lib-storage`.
+
+Java requires JDK 11 or later and Maven 3.6.3 or later. The bundled
+[AWS Maven build](aws/java/pom.xml) pins the AWS SDK and Jackson dependencies;
+Maven supplies the classpath when running `exec:java`. From the repository root,
+compile both Java examples with:
+
+```bash
+mvn --batch-mode --no-transfer-progress -f aws/java/pom.xml compile
+mvn --batch-mode --no-transfer-progress -f gcp/java/pom.xml compile
+```
+
+Compilation downloads the public dependencies. The GitHub compile checks build
+both examples on JDK 11 and 17 without cloud credentials. Running an example
+uses the environment variables supplied at onboarding.
 
 `aws/python/consumer.py` continuously downloads results named in completion
 messages. It uses the same AWS variables and optional `MAXIMIZER_DOWNLOAD_DIR`
@@ -267,8 +294,14 @@ python3 gcp/python/consumer.py
 
 Python requires `google-cloud-pubsub` and `google-cloud-storage`.
 JavaScript requires `@google-cloud/pubsub` and `@google-cloud/storage`.
-Java requires `com.google.cloud:google-cloud-pubsub`,
-`com.google.cloud:google-cloud-storage`, and `org.json:json`.
+The [GCP Maven build](gcp/java/pom.xml) pins the Google Cloud libraries BOM
+and `org.json:json`. After setting the GCP variables above, run it from the
+repository root with:
+
+```bash
+mvn -f gcp/java/pom.xml compile exec:java
+```
+
 Use the access permissions supplied at onboarding. The result JSON has the
 same shape across clouds.
 

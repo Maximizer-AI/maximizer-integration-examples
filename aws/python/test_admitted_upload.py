@@ -132,5 +132,42 @@ class AdmittedUploadTests(unittest.TestCase):
         self.s3.upload_file.assert_not_called()
 
 
+    def test_expired_or_claimed_filename_has_clear_recovery_scope(self):
+        for status, code in ((410, 'upload_expired'), (409, 'object_name_already_reserved')):
+            with self.subTest(code=code):
+                self.invoke.reset_mock()
+                self.invoke.invoke.side_effect = None
+                self.invoke.invoke.return_value = {'Payload': io.BytesIO(json.dumps({
+                    'status': status, 'error': code, 'url': 'private-transfer-url'}).encode())}
+                with self.assertRaisesRegex(RuntimeError, 'fresh UCID') as caught:
+                    self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+                self.assertNotIn('private-transfer-url', str(caught.exception))
+                self.assertEqual(self.invoke.invoke.call_count, 1)
+        self.client.put.assert_not_called()
+        self.s3.upload_file.assert_not_called()
+
+    @patch('admitted_upload.time.sleep')
+    def test_uncertain_incomplete_retry_stays_bounded_and_explains_limit(self, sleep):
+        self.invoke.invoke.side_effect = [
+            {'Payload': io.BytesIO(b'{"status":409,"error":"request_in_progress","retry_after":2}')}
+            for _ in range(3)
+        ]
+        with self.assertRaisesRegex(RuntimeError, 'fresh UCID if it cannot be recovered'):
+            self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        requests = [call.kwargs['Payload'] for call in self.invoke.invoke.call_args_list]
+        self.assertEqual(requests, [requests[0]] * 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.client.put.assert_not_called()
+        self.s3.upload_file.assert_not_called()
+
+    def test_unconfirmed_completion_does_not_suggest_automatic_replacement(self):
+        self.invoke.invoke.return_value = {'Payload': io.BytesIO(b'{"status":409,"error":"upload_conflict"}')}
+        with self.assertRaisesRegex(RuntimeError, 'contact Maximizer with the UCID before replacing'):
+            self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        self.assertEqual(self.invoke.invoke.call_count, 1)
+        self.client.put.assert_not_called()
+        self.s3.upload_file.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

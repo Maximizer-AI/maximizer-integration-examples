@@ -38,7 +38,13 @@ class AdmittedUploads:
             if transient and attempt < 2 and type(retry) is int and 1 <= retry <= 10:
                 time.sleep(retry)
                 continue
-            raise RuntimeError(f'Upload admission rejected: {status} {code}' + (f'; retry after {retry}s' if retry else ''))
+            guidance = {
+                'upload_expired': '; incomplete reservation expired; use a fresh UCID',
+                'object_name_already_reserved': '; filename is already reserved; changed or replacement files need a fresh UCID',
+                'request_in_progress': '; reservation is still incomplete; retry the unchanged command while valid; use a fresh UCID if it cannot be recovered',
+                'upload_conflict': '; completion could not be confirmed; contact Maximizer with the UCID before replacing this upload',
+            }.get(code, '')
+            raise RuntimeError(f'Upload admission rejected: {status} {code}' + (f'; retry after {retry}s' if retry else '') + guidance)
 
     @staticmethod
     def put(url, data):
@@ -57,7 +63,8 @@ class AdmittedUploads:
     def upload_file(self, filename, bucket, key):
         size = os.path.getsize(filename)
         # Stable for this exact file and destination, so restarting the same
-        # command after a network outage resumes instead of reserving again.
+        # command reuses a valid transfer or confirmed completion after a network
+        # outage. Expired or uncertain incomplete reservations need a fresh UCID.
         digest = hashlib.sha256(f'maximizer-upload-v1\0{bucket}\0{key}\0{size}\0'.encode())
         with open(filename, 'rb') as stream:
             for chunk in iter(lambda: stream.read(8 * 1024 ** 2), b''):
