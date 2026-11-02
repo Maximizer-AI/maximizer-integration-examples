@@ -207,14 +207,25 @@ JavaScript and Java accept the same arguments, in the same order:
 
 ```bash
 node aws/javascript/upload_and_fetch.mjs --ucid category_a call001 ./metadata.json ./call.wav
-java UploadAndFetch --ucid category_a call001 ./metadata.json ./call.wav
+mvn -f aws/java/pom.xml compile exec:java -Dexec.args="--ucid category_a call001 ./metadata.json ./call.wav"
 ```
 
 JavaScript requires `@aws-sdk/client-s3`, `@aws-sdk/client-sqs`, and
-`@aws-sdk/lib-storage`. Java requires a JDK supporting `Files.readString`,
-AWS SDK v2 modules `software.amazon.awssdk:s3` and `software.amazon.awssdk:sqs`,
-and `com.fasterxml.jackson.core:jackson-databind` with its transitive
-dependencies. Compile and run with these dependencies on the classpath.
+`@aws-sdk/lib-storage`.
+
+Java requires JDK 11 or later and Maven 3.6.3 or later. The bundled
+[AWS Maven build](aws/java/pom.xml) pins the AWS SDK and Jackson dependencies;
+Maven supplies the classpath when running `exec:java`. From the repository root,
+compile both Java examples with:
+
+```bash
+mvn --batch-mode --no-transfer-progress -f aws/java/pom.xml compile
+mvn --batch-mode --no-transfer-progress -f gcp/java/pom.xml compile
+```
+
+Compilation downloads the public dependencies. The GitHub compile checks build
+both examples on JDK 11 and 17 without cloud credentials. Running an example
+uses the environment variables supplied at onboarding.
 
 `aws/python/consumer.py` continuously downloads results named in completion
 messages. It uses the same AWS variables and optional `MAXIMIZER_DOWNLOAD_DIR`
@@ -238,8 +249,14 @@ python3 gcp/python/consumer.py
 
 Python requires `google-cloud-pubsub` and `google-cloud-storage`.
 JavaScript requires `@google-cloud/pubsub` and `@google-cloud/storage`.
-Java requires `com.google.cloud:google-cloud-pubsub`,
-`com.google.cloud:google-cloud-storage`, and `org.json:json`.
+The [GCP Maven build](gcp/java/pom.xml) pins the Google Cloud libraries BOM
+and `org.json:json`. After setting the GCP variables above, run it from the
+repository root with:
+
+```bash
+mvn -f gcp/java/pom.xml compile exec:java
+```
+
 Use the access permissions supplied at onboarding. The result JSON has the
 same shape across clouds.
 
