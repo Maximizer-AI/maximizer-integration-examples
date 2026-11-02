@@ -1,0 +1,18 @@
+{
+  "ucid": "demo001",
+  "agent_employee_id": "agent_01",
+  "agent_first_name": "Agent",
+  "agent_last_name": "One",
+  "manager_employee_id": "manager_01",
+  "manager_first_name": "Manager",
+  "manager_last_name": "One",
+  "call_datetime": "2026-10-04 10:15:00.000",
+  "string_code": "code_a",
+  "integer_count": 2,
+  "option_flag": 1,
+  "number_amount": 350.0,
+  "unknown_value": null,
+  "audio_files": [
+    "category_a__demo001.mp3"
+  ]
+}

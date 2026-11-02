@@ -1,0 +1,20 @@
+[
+  {
+    "email": "team.manager@example.com",
+    "managed_unit_ids": [
+      "team_a"
+    ]
+  },
+  {
+    "email": "center.manager@example.com",
+    "managed_unit_ids": [
+      "center_a"
+    ]
+  },
+  {
+    "email": "division.manager@example.com",
+    "managed_unit_ids": [
+      "division_a"
+    ]
+  }
+]

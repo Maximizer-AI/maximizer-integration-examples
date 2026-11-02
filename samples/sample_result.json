@@ -1,0 +1,91 @@
+{
+  "parameter_a": {
+    "title": "Parameter A",
+    "value": "Yes",
+    "order": 1,
+    "quotes": {
+      "title": "Quotes",
+      "value": [
+        {
+          "quote_text": "Agent: Are the details correct?",
+          "quote_start_segment_timestamp": "00:00:12"
+        }
+      ]
+    }
+  },
+  "parameter_b": {
+    "title": "Parameter B",
+    "value": "2",
+    "order": 2,
+    "quotes": {
+      "title": "Quotes",
+      "value": [
+        {
+          "quote_text": "Participant: Two.",
+          "quote_start_segment_timestamp": "00:00:20"
+        }
+      ]
+    }
+  },
+  "parameter_c": {
+    "title": "Parameter C",
+    "value": "No",
+    "order": 3,
+    "quotes": {
+      "title": "Quotes",
+      "value": []
+    }
+  },
+  "summary": {
+    "title": "Summary",
+    "value": "The participants confirmed the details and the count.",
+    "order": 4
+  },
+  "transcript": {
+    "title": "Transcript",
+    "value": [
+      "[00:00 - 00:15]",
+      "Agent: Are the details correct?",
+      "Participant: Yes.",
+      "[00:15 - 00:25]",
+      "Agent: How many?",
+      "Participant: Two."
+    ],
+    "order": 5
+  },
+  "ucid": {
+    "title": "Ucid",
+    "value": "call001",
+    "order": 6
+  },
+  "agent_employee_id": {
+    "title": "Agent employee id",
+    "value": "agent_01",
+    "order": 7
+  },
+  "agent_first_name": {
+    "title": "Agent first name",
+    "value": "Agent",
+    "order": 8
+  },
+  "agent_last_name": {
+    "title": "Agent last name",
+    "value": "One",
+    "order": 9
+  },
+  "manager_employee_id": {
+    "title": "Manager employee id",
+    "value": "manager_01",
+    "order": 10
+  },
+  "manager_first_name": {
+    "title": "Manager first name",
+    "value": "Manager",
+    "order": 11
+  },
+  "manager_last_name": {
+    "title": "Manager last name",
+    "value": "One",
+    "order": 12
+  }
+}

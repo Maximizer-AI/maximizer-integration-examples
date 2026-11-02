@@ -1,0 +1,87 @@
+{
+  "parameter_a": {
+    "title": "Parameter A",
+    "value": "Yes",
+    "order": 1,
+    "quotes": {
+      "title": "Quotes",
+      "value": [
+        {
+          "quote_text": "Hello.",
+          "quote_start_segment_timestamp": "00:00:00"
+        }
+      ]
+    }
+  },
+  "parameter_b": {
+    "title": "Parameter B",
+    "value": "3",
+    "order": 2,
+    "quotes": {
+      "title": "Quotes",
+      "value": [
+        {
+          "quote_text": "One, two, three.",
+          "quote_start_segment_timestamp": "00:00:01"
+        }
+      ]
+    }
+  },
+  "parameter_c": {
+    "title": "Parameter C",
+    "value": "No",
+    "order": 3,
+    "quotes": {
+      "title": "Quotes",
+      "value": []
+    }
+  },
+  "summary": {
+    "title": "Summary",
+    "value": "A synthetic voice greets, counts to three, and says thank you.",
+    "order": 4
+  },
+  "transcript": {
+    "title": "Transcript",
+    "value": [
+      "[00:00 - 00:04]",
+      "Speaker: Hello. One, two, three. Thank you."
+    ],
+    "order": 5
+  },
+  "ucid": {
+    "title": "Ucid",
+    "value": "demo001",
+    "order": 6
+  },
+  "agent_employee_id": {
+    "title": "Agent employee id",
+    "value": "agent_01",
+    "order": 7
+  },
+  "agent_first_name": {
+    "title": "Agent first name",
+    "value": "Agent",
+    "order": 8
+  },
+  "agent_last_name": {
+    "title": "Agent last name",
+    "value": "One",
+    "order": 9
+  },
+  "manager_employee_id": {
+    "title": "Manager employee id",
+    "value": "manager_01",
+    "order": 10
+  },
+  "manager_first_name": {
+    "title": "Manager first name",
+    "value": "Manager",
+    "order": 11
+  },
+  "manager_last_name": {
+    "title": "Manager last name",
+    "value": "One",
+    "order": 12
+  }
+}
