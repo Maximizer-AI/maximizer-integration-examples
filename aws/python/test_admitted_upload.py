@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from admitted_upload import AdmittedUploads
 
@@ -84,6 +84,51 @@ class AdmittedUploadTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'network unavailable'):
             self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
         self.assertEqual([event['operation'] for event in self.events], ['start'])
+        self.s3.upload_file.assert_not_called()
+
+    def test_restarting_exact_file_reuses_request_id(self):
+        self.responses()
+        self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        self.assertEqual(self.events[0]['request_id'], self.events[2]['request_id'])
+        self.file.write_bytes(b'different synthetic content')
+        self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        self.assertNotEqual(self.events[0]['request_id'], self.events[4]['request_id'])
+
+    def test_completed_reservation_is_not_uploaded_again(self):
+        self.invoke.invoke.return_value = {'Payload': io.BytesIO(b'{"status":200,"completed":true}')}
+        self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        self.client.put.assert_not_called()
+        self.s3.upload_file.assert_not_called()
+
+    @patch('admitted_upload.time.sleep')
+    def test_transient_admission_failure_retries_the_identical_request(self, sleep):
+        def payload(value):
+            return {'Payload': io.BytesIO(json.dumps(value).encode())}
+        self.invoke.invoke.side_effect = [
+            payload({'status': 503, 'error': 'admission_unavailable', 'retry_after': 5}),
+            payload({'status': 409, 'error': 'request_in_progress', 'retry_after': 2}),
+            payload({'status': 200, 'completed': True}),
+        ]
+        self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        requests = [call.kwargs['Payload'] for call in self.invoke.invoke.call_args_list]
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(requests, [requests[0]] * 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 2])
+        self.client.put.assert_not_called()
+        self.s3.upload_file.assert_not_called()
+
+    @patch('admitted_upload.time.sleep')
+    def test_transient_retry_is_bounded_and_never_falls_back(self, sleep):
+        self.invoke.invoke.side_effect = [
+            {'Payload': io.BytesIO(b'{"status":503,"error":"admission_unavailable","retry_after":5}')}
+            for _ in range(3)
+        ]
+        with self.assertRaisesRegex(RuntimeError, '503 admission_unavailable'):
+            self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        self.assertEqual(self.invoke.invoke.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.client.put.assert_not_called()
         self.s3.upload_file.assert_not_called()
 
 
