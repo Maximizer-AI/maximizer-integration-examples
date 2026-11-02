@@ -1,0 +1,25 @@
+name: Python admitted upload tests
+
+on:
+  pull_request:
+    paths:
+      - 'aws/python/**'
+      - '.github/workflows/python-admitted-upload.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'aws/python/**'
+      - '.github/workflows/python-admitted-upload.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  transport-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Reserved transfer and retry tests without network access
+        run: python3 -m unittest discover -s aws/python -p test_admitted_upload.py -v
