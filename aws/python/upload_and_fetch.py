@@ -77,7 +77,12 @@ def _clients(region: str):
         aws_secret_access_key=os.environ["MAXIMIZER_AWS_SECRET_ACCESS_KEY"],
         config=Config(retries={"max_attempts": 5, "mode": "standard"}),
     )
-    return boto3.client("s3", **creds), boto3.client("sqs", **creds)
+    s3 = boto3.client("s3", **creds)
+    if os.environ.get("MAXIMIZER_UPLOAD_FUNCTION"):
+        from admitted_upload import AdmittedUploads
+        s3 = AdmittedUploads(s3, boto3.client("lambda", **creds),
+                             os.environ["MAXIMIZER_UPLOAD_FUNCTION"], region)
+    return s3, boto3.client("sqs", **creds)
 
 
 def _check_ucid(ucid: str) -> None:

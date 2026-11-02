@@ -192,6 +192,31 @@ python3 aws/python/upload_and_fetch.py --ucid --batch <category> <ucid> <metadat
 python3 aws/python/upload_and_fetch.py --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>
 ```
 
+### Admission-enabled uploads (Python)
+
+If your supplied configuration includes an upload function, also set:
+
+```bash
+export MAXIMIZER_UPLOAD_FUNCTION='<upload-function-from-your-configuration>'
+```
+
+Use the Python commands above with this setting. Keep `admitted_upload.py`
+beside `upload_and_fetch.py`. These credentials require admission before a file
+is stored and cannot perform direct S3 writes. Uploads use temporary, reserved
+transfer URLs; each completed filename is create-only. Use a new UCID for a
+new test, and do not log or share transfer URLs.
+
+A quota rejection reports `429` and a retry delay. Wait for that delay before
+starting another upload. Network retries of a reserved part reuse its existing
+reservation. The client never falls back to direct S3 on admission failure.
+Results still use the configured S3 polling or SQS notification flow.
+Organisation roster updates require a separately authorized upload channel;
+the recording-transfer function rejects those updates.
+
+This optional transport is currently implemented in Python. The JavaScript
+and Java clients require direct-ingest credentials; they do not support
+`MAXIMIZER_UPLOAD_FUNCTION`.
+
 The following examples show the argument forms. Except for the linked org
 samples, their local filenames are placeholders. Prepare metadata for the
 corresponding uploaded recording names:
