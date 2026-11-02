@@ -79,9 +79,16 @@ def _clients(region: str):
     )
     s3 = boto3.client("s3", **creds)
     if os.environ.get("MAXIMIZER_UPLOAD_FUNCTION"):
-        from admitted_upload import AdmittedUploads
-        s3 = AdmittedUploads(s3, boto3.client("lambda", **creds),
-                             os.environ["MAXIMIZER_UPLOAD_FUNCTION"], region)
+        # Resolve only the trusted adjacent source, including under Python -I
+        # (which intentionally omits the script directory from sys.path).
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location("maximizer_admitted_upload",
+            Path(__file__).with_name("admitted_upload.py"))
+        transport = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(transport)
+        s3 = transport.AdmittedUploads(s3, boto3.client("lambda", **creds),
+                                      os.environ["MAXIMIZER_UPLOAD_FUNCTION"], region)
     return s3, boto3.client("sqs", **creds)
 
 
