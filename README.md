@@ -208,7 +208,11 @@ new test, and do not log or share transfer URLs.
 
 A quota rejection reports `429` and a retry delay. Wait for that delay before
 starting another upload. Network retries of a reserved part reuse its existing
-reservation. The client never falls back to direct S3 on admission failure.
+reservation. Restarting the exact same command and unchanged file resumes its
+reservation while it is valid, or reuses an already completed upload. The
+client never falls back to direct S3 on admission failure.
+Temporary service failures and in-progress reservations get at most two short
+retries using the same request; quota and filename-conflict rejections do not.
 Results still use the configured S3 polling or SQS notification flow.
 Organisation roster updates require a separately authorized upload channel;
 the recording-transfer function rejects those updates.
