@@ -1,0 +1,31 @@
+name: Java example compile checks
+
+on:
+  pull_request:
+    paths: ['aws/java/**', 'gcp/java/**', '.github/workflows/java-compile.yml', 'README.md']
+  push:
+    branches: [main]
+    paths: ['aws/java/**', 'gcp/java/**', '.github/workflows/java-compile.yml', 'README.md']
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['11', '17']
+        example: [aws, gcp]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - name: Compile with pinned dependencies
+        run: mvn --batch-mode --no-transfer-progress -f ${{ matrix.example }}/java/pom.xml compile
