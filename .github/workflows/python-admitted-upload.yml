@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - 'aws/python/**'
+      - 'aws/java/**'
+      - 'aws/javascript/**'
       - '.github/workflows/python-admitted-upload.yml'
   push:
     branches: [main]
     paths:
       - 'aws/python/**'
+      - 'aws/java/**'
+      - 'aws/javascript/**'
       - '.github/workflows/python-admitted-upload.yml'
 
 permissions:

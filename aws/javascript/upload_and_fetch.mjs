@@ -1,11 +1,13 @@
 // Upload recordings and metadata, then download the completion result.
-// See README.md. Requires @aws-sdk/client-s3, @aws-sdk/client-sqs, @aws-sdk/lib-storage.
+// See README.md and package.json for the required AWS SDK dependencies.
 import { readFile, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { createReadStream } from "node:fs";
 import { S3Client, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } from "@aws-sdk/client-sqs";
 import { Upload } from "@aws-sdk/lib-storage";
+import { AdmittedUploads } from "./admitted_upload.mjs";
+import { waitForCompletion } from "./result_waiter.mjs";
 
 function checkCategory(category) {
   if ((!category || /[^a-z0-9_]/.test(category)) || category.includes("__"))
@@ -40,8 +42,6 @@ const extensionIsAccepted = (p) => {
     && (ext === ext.toLowerCase() || ext === ext.toUpperCase());
 };
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function main(category, audioPath) {
   checkCategory(category);
   if (!extensionIsAccepted(audioPath)) throw new Error(`${audioPath}: expected .wav, .mp3 or .json, spelled all-lower or all-upper`);
@@ -50,7 +50,7 @@ async function main(category, audioPath) {
   if (!filename.startsWith(prefix)) filename = prefix + filename;
   const ext = (process.env.MAXIMIZER_RESULTS_EXT || "json").replace(/^\./, "");
   const stem = filename.slice(prefix.length).replace(/\.[^.]*$/, "");
-  const { s3, sqs } = clients();
+  const { s3, sqs } = await clients();
   await put(s3, env("MAXIMIZER_INPUT_BUCKET"), `${category}/${filename}`, audioPath);
   await waitForResult(s3, sqs, env("MAXIMIZER_RESULTS_BUCKET"), `${category}/${stem}.${ext}`);
 }
@@ -107,17 +107,31 @@ async function checkMetadataFile(metadataPath, category, ucid, audioNames) {
   return metadata;
 }
 
-function clients() {
+async function clients() {
   const region = env("MAXIMIZER_AWS_REGION"); // required: the region in your config file
   const credentials = {
     accessKeyId: process.env.MAXIMIZER_AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.MAXIMIZER_AWS_SECRET_ACCESS_KEY,
   };
-  return { s3: new S3Client({ region, credentials, maxAttempts: 5 }), sqs: new SQSClient({ region, credentials }) };
+  const s3 = new S3Client({ region, credentials, maxAttempts: 5 });
+  if (process.env.MAXIMIZER_UPLOAD_FUNCTION) {
+    const { LambdaClient, InvokeCommand } = await import("@aws-sdk/client-lambda");
+    const lambda = new LambdaClient({ region, credentials, maxAttempts: 5 });
+    s3.admittedUploads = new AdmittedUploads(async event => {
+      const response = await lambda.send(new InvokeCommand({
+        FunctionName: process.env.MAXIMIZER_UPLOAD_FUNCTION,
+        InvocationType: "RequestResponse", Payload: Buffer.from(JSON.stringify(event)),
+      }));
+      if (response.FunctionError) throw new Error("Admission function failed");
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.Payload));
+    }, region);
+  }
+  return { s3, sqs: new SQSClient({ region, credentials }) };
 }
 
 async function put(s3, bucket, key, path) {
   console.log(`uploading ${path} -> ${bucket}/${key}`);
+  if (s3.admittedUploads) return s3.admittedUploads.uploadFile(path, bucket, key);
   await new Upload({ client: s3, params: { Bucket: bucket, Key: key, Body: createReadStream(path) } }).done();
 }
 
@@ -142,7 +156,7 @@ async function uploadUcidCall(category, ucid, metadataPath, audioPaths, batch) {
   const uploadMetadataName = metadataName(category, ucid, metadataPath);
   await checkMetadataFile(metadataPath, category, ucid, audioNames);
 
-  const { s3, sqs } = clients();
+  const { s3, sqs } = await clients();
   const inputBucket = process.env.MAXIMIZER_INPUT_BUCKET;
   // 1) Every part plus the one metadata file, in any order.
   for (let i = 0; i < audioPaths.length; i++) await put(s3, inputBucket, `${folder}/${audioNames[i]}`, audioPaths[i]);
@@ -154,34 +168,18 @@ async function uploadUcidCall(category, ucid, metadataPath, audioPaths, batch) {
 }
 
 async function waitForResult(s3, sqs, resultsBucket, resultKey) {
-  const deadline = Date.now() + 15 * 60 * 1000;
-  const queueUrl = process.env.MAXIMIZER_RESULTS_QUEUE_URL;
-  const download = async () => {
-    const obj = await s3.send(new GetObjectCommand({ Bucket: resultsBucket, Key: resultKey }));
-    await writeFile(basename(resultKey), await obj.Body.transformToByteArray());
-    console.log(`result ready: ${resultsBucket}/${resultKey} -> ${basename(resultKey)}`);
-  };
-  if (queueUrl) {
-    console.log(`waiting for the file_status notification for ${resultKey} on ${queueUrl}`);
-    while (Date.now() < deadline) {
-      const r = await sqs.send(new ReceiveMessageCommand({ QueueUrl: queueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 20 }));
-      for (const m of r.Messages ?? []) {
-        if (JSON.parse(m.Body).results_file_name !== resultKey) continue; // another call's notification
-        await download();
-        await sqs.send(new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: m.ReceiptHandle }));
-        return;
-      }
-    }
-    throw new Error("timed out waiting for the notification — contact Maximizer with the UCID");
-  }
-  console.log(`waiting for ${resultsBucket}/${resultKey}`);
-  while (Date.now() < deadline) {
-    try {
-      await s3.send(new HeadObjectCommand({ Bucket: resultsBucket, Key: resultKey }));
-      return download();
-    } catch { await sleep(15000); }
-  }
-  throw new Error("timed out waiting for result — contact Maximizer with the UCID");
+  return waitForCompletion({
+    resultKey, queueUrl: process.env.MAXIMIZER_RESULTS_QUEUE_URL,
+    admitted: Boolean(process.env.MAXIMIZER_UPLOAD_FUNCTION),
+    head: () => s3.send(new HeadObjectCommand({ Bucket: resultsBucket, Key: resultKey })),
+    download: async () => {
+      const obj = await s3.send(new GetObjectCommand({ Bucket: resultsBucket, Key: resultKey }));
+      await writeFile(basename(resultKey), await obj.Body.transformToByteArray());
+      console.log(`result ready: ${resultsBucket}/${resultKey} -> ${basename(resultKey)}`);
+    },
+    receive: () => sqs.send(new ReceiveMessageCommand({ QueueUrl: process.env.MAXIMIZER_RESULTS_QUEUE_URL, MaxNumberOfMessages: 10, WaitTimeSeconds: 20 })),
+    remove: message => sqs.send(new DeleteMessageCommand({ QueueUrl: process.env.MAXIMIZER_RESULTS_QUEUE_URL, ReceiptHandle: message.ReceiptHandle })),
+  });
 }
 
 // The daily org file and users list: same date, both to `org/`.
@@ -193,7 +191,7 @@ async function uploadOrgFiles(orgPath, usersPath) {
   if (o[2] !== u[2]) throw new Error("the org file and the users list must carry the same date");
   for (const p of [orgPath, usersPath]) // refuse a file that is not a JSON array locally
     if (!Array.isArray(await readJson(p))) throw new Error(`${p}: must be a JSON array`);
-  const { s3 } = clients();
+  const { s3 } = await clients();
   for (const p of [orgPath, usersPath]) await put(s3, process.env.MAXIMIZER_INPUT_BUCKET, `org/${basename(p)}`, p);
   console.log("upload complete (org files produce no result file)");
 }

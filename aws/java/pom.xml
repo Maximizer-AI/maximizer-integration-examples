@@ -29,6 +29,13 @@
       <groupId>software.amazon.awssdk</groupId><artifactId>sqs</artifactId>
     </dependency>
     <dependency>
+      <groupId>software.amazon.awssdk</groupId><artifactId>lambda</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId><artifactId>junit</artifactId>
+      <version>4.13.2</version><scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId>
       <version>2.22.4</version>
     </dependency>
@@ -46,8 +53,13 @@
         <artifactId>maven-compiler-plugin</artifactId>
         <version>3.14.1</version>
         <configuration>
-          <includes><include>UploadAndFetch.java</include></includes>
+          <includes><include>UploadAndFetch.java</include><include>AdmittedUploads.java</include></includes>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
       </plugin>
       <plugin>
         <groupId>org.codehaus.mojo</groupId>

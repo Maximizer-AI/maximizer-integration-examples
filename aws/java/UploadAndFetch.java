@@ -40,13 +40,39 @@ public class UploadAndFetch {
         String name = path.getFileName().toString();
         String pattern = "\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*\\.json";
         if (name.startsWith(prefix) && name.substring(prefix.length()).matches(pattern)) return name;
-        String suffix = System.getenv().getOrDefault("MAXIMIZER_METADATA_SUFFIX", "");
+        String suffix = setting("MAXIMIZER_METADATA_SUFFIX", "");
         if (!suffix.matches(pattern)) fail("metadata filename must be <category>__<UCID>.<suffix>.json, or set MAXIMIZER_METADATA_SUFFIX to the full ending agreed at onboarding (including the leading dot and .json)");
         return prefix + suffix;
     }
 
+    // A single construction seam lets offline CLI tests supply local fakes.
+    // The default runtime reads the environment and uses the ordinary AWS SDK.
+    static class Clients {
+        String environment(String name) { return System.getenv(name); }
+        S3Client s3(String region) {
+            return S3Client.builder().region(Region.of(region))
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
+                    env("MAXIMIZER_AWS_ACCESS_KEY_ID"), env("MAXIMIZER_AWS_SECRET_ACCESS_KEY"))))
+                .build();
+        }
+        SqsClient sqs(String region) {
+            return SqsClient.builder().region(Region.of(region))
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
+                    env("MAXIMIZER_AWS_ACCESS_KEY_ID"), env("MAXIMIZER_AWS_SECRET_ACCESS_KEY"))))
+                .build();
+        }
+        void admittedUpload(Path file, String bucket, String key, String function) throws Exception {
+            AdmittedUploads.uploadConfigured(file, bucket, key, env("MAXIMIZER_AWS_REGION"), function,
+                StaticCredentialsProvider.create(AwsBasicCredentials.create(
+                    env("MAXIMIZER_AWS_ACCESS_KEY_ID"), env("MAXIMIZER_AWS_SECRET_ACCESS_KEY"))));
+        }
+    }
+    static Clients clients = new Clients();
+    static String setting(String name, String fallback) {
+        String value = clients.environment(name); return value == null ? fallback : value;
+    }
     static String env(String name) {
-        String v = System.getenv(name);
+        String v = clients.environment(name);
         if (v == null || v.isBlank()) throw new IllegalStateException("missing env var: " + name);
         return v;
     }
@@ -61,17 +87,24 @@ public class UploadAndFetch {
         java.util.regex.Pattern.compile("(org|users)_(\\d{4}-\\d{2}-\\d{2})\\.json");
 
     static S3Client s3Client(String region) {
-        return S3Client.builder().region(Region.of(region))
-            .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
-                env("MAXIMIZER_AWS_ACCESS_KEY_ID"), env("MAXIMIZER_AWS_SECRET_ACCESS_KEY"))))
-            .build();
+        return clients.s3(region);
     }
 
     static void fail(String message) { System.err.println(message); System.exit(2); }
 
-    static void put(S3Client s3, String bucket, String key, Path path) {
+    static boolean admitted(String function) { return function != null && !function.isEmpty(); }
+
+    interface FileUpload { void upload(Path path, String bucket, String key) throws Exception; }
+    static void put(S3Client s3, String bucket, String key, Path path) throws Exception {
+        String function = clients.environment("MAXIMIZER_UPLOAD_FUNCTION");
+        put(s3, bucket, key, path, function,
+            (file, targetBucket, targetKey) -> clients.admittedUpload(file, targetBucket, targetKey, function));
+    }
+    static void put(S3Client s3, String bucket, String key, Path path, String function,
+                    FileUpload transfer) throws Exception {
         System.out.printf("uploading %s -> %s/%s%n", path, bucket, key);
-        s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(), RequestBody.fromFile(path));
+        if (admitted(function)) transfer.upload(path, bucket, key);
+        else s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(), RequestBody.fromFile(path));
     }
 
     /** One call: its recording part(s) plus one metadata file, named by the UCID. */
@@ -109,22 +142,11 @@ public class UploadAndFetch {
     static void waitForResult(S3Client s3, String region, String resultsBucket, String resultKey) throws Exception {
         long deadline = System.currentTimeMillis() + 15 * 60 * 1000L;
         Path out = Paths.get(Paths.get(resultKey).getFileName().toString());
-        String queueUrl = System.getenv("MAXIMIZER_RESULTS_QUEUE_URL");
+        String queueUrl = clients.environment("MAXIMIZER_RESULTS_QUEUE_URL");
         if (queueUrl != null && !queueUrl.isBlank()) {
-            try (SqsClient sqs = SqsClient.builder().region(Region.of(region))
-                    .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
-                        env("MAXIMIZER_AWS_ACCESS_KEY_ID"), env("MAXIMIZER_AWS_SECRET_ACCESS_KEY")))).build()) {
-                System.out.printf("waiting for the file_status notification for %s on %s%n", resultKey, queueUrl);
-                while (System.currentTimeMillis() < deadline) {
-                    for (Message m : sqs.receiveMessage(ReceiveMessageRequest.builder()
-                            .queueUrl(queueUrl).maxNumberOfMessages(10).waitTimeSeconds(20).build()).messages()) {
-                        if (!resultKey.equals(jsonField(m.body(), "results_file_name"))) continue; // another call's
-                        s3.getObject(GetObjectRequest.builder().bucket(resultsBucket).key(resultKey).build(), ResponseTransformer.toFile(fresh(out)));
-                        sqs.deleteMessage(DeleteMessageRequest.builder().queueUrl(queueUrl).receiptHandle(m.receiptHandle()).build());
-                        System.out.printf("result ready: %s/%s -> %s%n", resultsBucket, resultKey, out);
-                        return;
-                    }
-                }
+            try (SqsClient sqs = clients.sqs(region)) {
+                if (waitForQueueResult(s3, sqs, resultsBucket, resultKey, queueUrl,
+                        admitted(clients.environment("MAXIMIZER_UPLOAD_FUNCTION")), deadline)) return;
             }
             System.err.println("timed out waiting for the notification — contact Maximizer with the UCID");
             System.exit(1);
@@ -143,6 +165,38 @@ public class UploadAndFetch {
         }
         System.err.println("timed out waiting for result — contact Maximizer with the UCID");
         System.exit(1);
+    }
+
+    static boolean existingResult(S3Client s3, String bucket, String key, Path out) throws Exception {
+        try {
+            s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
+        } catch (S3Exception error) {
+            String code = error.awsErrorDetails() == null ? "" : error.awsErrorDetails().errorCode();
+            if (error.statusCode() == 404 || "404".equals(code) || "NoSuchKey".equals(code) || "NotFound".equals(code)) return false;
+            throw error;
+        }
+        s3.getObject(GetObjectRequest.builder().bucket(bucket).key(key).build(), ResponseTransformer.toFile(fresh(out)));
+        System.out.printf("result ready: %s/%s -> %s%n", bucket, key, out);
+        return true;
+    }
+
+    static boolean waitForQueueResult(S3Client s3, SqsClient sqs, String bucket, String key,
+                                     String queue, boolean admitted, long deadline) throws Exception {
+        Path out = Paths.get(Paths.get(key).getFileName().toString());
+        if (admitted && existingResult(s3, bucket, key, out)) return true;
+        System.out.printf("waiting for the file_status notification for %s on %s%n", key, queue);
+        while (System.currentTimeMillis() < deadline) {
+            for (Message message : sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queue).maxNumberOfMessages(10).waitTimeSeconds(20).build()).messages()) {
+                if (!key.equals(jsonField(message.body(), "results_file_name"))) continue;
+                s3.getObject(GetObjectRequest.builder().bucket(bucket).key(key).build(), ResponseTransformer.toFile(fresh(out)));
+                sqs.deleteMessage(DeleteMessageRequest.builder().queueUrl(queue).receiptHandle(message.receiptHandle()).build());
+                System.out.printf("result ready: %s/%s -> %s%n", bucket, key, out);
+                return true;
+            }
+            if (admitted && existingResult(s3, bucket, key, out)) return true;
+        }
+        return false;
     }
 
     /** The SDK refuses to overwrite an existing file; a rerun for the same call must. */
@@ -221,7 +275,7 @@ public class UploadAndFetch {
         String prefix = category + "__";
         if (!filename.startsWith(prefix)) filename = prefix + filename;
         String stem = filename.substring(prefix.length(), filename.lastIndexOf('.'));
-        String ext = System.getenv().getOrDefault("MAXIMIZER_RESULTS_EXT", "json").replaceFirst("^\\.", "");
+        String ext = setting("MAXIMIZER_RESULTS_EXT", "json").replaceFirst("^\\.", "");
         String region = env("MAXIMIZER_AWS_REGION");
         try (S3Client s3 = s3Client(region)) {
             put(s3, env("MAXIMIZER_INPUT_BUCKET"), category + "/" + filename, audioPath);
@@ -230,6 +284,12 @@ public class UploadAndFetch {
     }
 
     static String jsonField(String json, String field) throws Exception {
-        return JSON.readTree(json).path(field).asText(null);
+        try {
+            JsonNode notification = JSON.readTree(json);
+            if (notification == null || !notification.isObject()) throw new IllegalArgumentException();
+            return notification.path(field).asText(null);
+        } catch (Exception error) {
+            throw new IllegalStateException("Invalid result notification; no queue message was deleted");
+        }
     }
 }
