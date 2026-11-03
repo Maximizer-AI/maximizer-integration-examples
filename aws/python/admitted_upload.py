@@ -65,7 +65,8 @@ class AdmittedUploads:
         # Stable for this exact file and destination, so restarting the same
         # command reuses a valid transfer or confirmed completion after a network
         # outage. Expired or uncertain incomplete reservations need a fresh UCID.
-        digest = hashlib.sha256(f'maximizer-upload-v1\0{bucket}\0{key}\0{size}\0'.encode())
+        identity_prefix = f'maximizer-upload-v1\0{bucket}\0{key}\0{size}\0'.encode()
+        digest = hashlib.sha256(identity_prefix)
         with open(filename, 'rb') as stream:
             for chunk in iter(lambda: stream.read(8 * 1024 ** 2), b''):
                 digest.update(chunk)
@@ -83,12 +84,16 @@ class AdmittedUploads:
                     or parsed.username or parsed.password or parsed.port not in (None, 443)):
                 raise RuntimeError('Invalid reserved upload destination')
         etags = []
+        transferred = hashlib.sha256(identity_prefix)
         with open(filename, 'rb') as stream:
             for part in parts:
                 data = stream.read(part['size'])
                 if len(data) != part['size']:
                     raise RuntimeError('Local file changed during upload')
+                transferred.update(data)
                 etags.append(self.put(part['url'], data))
             if stream.read(1):
                 raise RuntimeError('Local file changed during upload')
+        if transferred.digest() != digest.digest():
+            raise RuntimeError('Local file changed during upload; completion was not attempted')
         self.invoke({'operation': 'complete', 'request_id': request_id, 'etags': etags})

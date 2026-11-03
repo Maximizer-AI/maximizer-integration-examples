@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from admitted_upload import AdmittedUploads
+import upload_and_fetch as published_client
+from botocore.exceptions import ClientError
 
 
 class AdmittedUploadTests(unittest.TestCase):
@@ -95,6 +97,22 @@ class AdmittedUploadTests(unittest.TestCase):
         self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
         self.assertNotEqual(self.events[0]['request_id'], self.events[4]['request_id'])
 
+    def test_same_size_change_after_hash_does_not_complete_old_identity(self):
+        self.file.write_bytes(b'old!')
+        self.responses()
+        original_start = self.invoke.invoke.side_effect
+        def changing_start(**kwargs):
+            response = original_start(**kwargs)
+            if json.loads(kwargs['Payload'])['operation'] == 'start':
+                self.file.write_bytes(b'new!')
+            return response
+        self.invoke.invoke.side_effect = changing_start
+        with self.assertRaisesRegex(RuntimeError, 'Local file changed.*completion was not attempted'):
+            self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
+        self.assertEqual([event['operation'] for event in self.events], ['start'])
+        self.assertEqual(self.client.put.call_args.args[1], b'new!')
+        self.s3.upload_file.assert_not_called()
+
     def test_completed_reservation_is_not_uploaded_again(self):
         self.invoke.invoke.return_value = {'Payload': io.BytesIO(b'{"status":200,"completed":true}')}
         self.client.upload_file(str(self.file), 'demo-bucket', 'category_a__demo.mp3')
@@ -167,6 +185,60 @@ class AdmittedUploadTests(unittest.TestCase):
         self.assertEqual(self.invoke.invoke.call_count, 1)
         self.client.put.assert_not_called()
         self.s3.upload_file.assert_not_called()
+
+
+class AdmittedResultReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.s3, self.sqs = Mock(), Mock()
+        self.environment = patch.dict('os.environ', {
+            'MAXIMIZER_UPLOAD_FUNCTION': 'configured-upload',
+            'MAXIMIZER_RESULTS_QUEUE_URL': 'https://example.invalid/owned-queue'})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        output = patch('builtins.print')
+        output.start(); self.addCleanup(output.stop)
+        self.sqs.receive_message.return_value = {'Messages': [{
+            'Body': json.dumps({'results_file_name': 'category_a/demo.json',
+                                'status': 'processed', 'message_timestamp': 'synthetic'}),
+            'ReceiptHandle': 'owned-receipt'}]}
+
+    def wait(self):
+        published_client._wait_for_result(self.s3, self.sqs, 'demo-results', 'category_a/demo.json')
+
+    def test_completed_result_is_downloaded_without_another_queue_message(self):
+        # Consumed completion notification: a replay must not receive or delete
+        # any shared-queue messages when its immutable result already exists.
+        self.sqs.receive_message.return_value = {'Messages': []}
+        self.sqs.receive_message.side_effect = AssertionError('Completed replay must not receive messages')
+        self.wait()
+        self.s3.head_object.assert_called_once_with(Bucket='demo-results', Key='category_a/demo.json')
+        self.s3.download_file.assert_called_once_with('demo-results', 'category_a/demo.json', 'demo.json')
+        self.sqs.receive_message.assert_not_called()
+        self.sqs.delete_message.assert_not_called()
+
+    def test_not_yet_available_result_still_waits_for_its_notification(self):
+        self.s3.head_object.side_effect = ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+        self.wait()
+        self.sqs.receive_message.assert_called_once()
+        self.s3.download_file.assert_called_once_with('demo-results', 'category_a/demo.json', 'demo.json')
+        self.sqs.delete_message.assert_called_once_with(
+            QueueUrl='https://example.invalid/owned-queue', ReceiptHandle='owned-receipt')
+
+    def test_unreadable_result_does_not_consume_or_delete_queue_messages(self):
+        self.s3.head_object.side_effect = ClientError({'Error': {'Code': '403'}}, 'HeadObject')
+        with self.assertRaises(ClientError):
+            self.wait()
+        self.sqs.receive_message.assert_not_called()
+        self.sqs.delete_message.assert_not_called()
+        self.s3.download_file.assert_not_called()
+
+    def test_direct_ingest_queue_behavior_is_preserved(self):
+        with patch.dict('os.environ'):
+            published_client.os.environ.pop('MAXIMIZER_UPLOAD_FUNCTION', None)
+            self.wait()
+        self.s3.head_object.assert_not_called()
+        self.sqs.receive_message.assert_called_once()
+        self.sqs.delete_message.assert_called_once()
 
 
 if __name__ == '__main__':

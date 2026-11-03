@@ -185,6 +185,18 @@ def _wait_for_result(s3, sqs, results_bucket: str, result_key: str) -> None:
     queue_url = os.environ.get("MAXIMIZER_RESULTS_QUEUE_URL")
     deadline = time.time() + 15 * 60
     out_path = os.path.basename(result_key)
+    if queue_url and os.environ.get("MAXIMIZER_UPLOAD_FUNCTION"):
+        # A completed admitted replay emits no new completion notification.
+        # Read its existing result without taking messages from a shared queue.
+        try:
+            s3.head_object(Bucket=results_bucket, Key=result_key)
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
+                raise
+        else:
+            s3.download_file(results_bucket, result_key, out_path)
+            print(f"result ready: {results_bucket}/{result_key} -> {out_path}")
+            return
     if queue_url:
         print(f"waiting for the file_status notification for {result_key} on {queue_url}")
         while time.time() < deadline:
