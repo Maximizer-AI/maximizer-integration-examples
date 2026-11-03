@@ -71,7 +71,7 @@ duplicate keys, `NaN`, or `Infinity`. A UTF-8 BOM is tolerated. `ucid` must
 match the call id argument. `audio_files` must list the uploaded filenames
 without folders, exactly in part order. With direct-ingest credentials, a call
 rejected during processing can wait for a corrected file under the same name.
-[Admission-enabled uploads](#admission-enabled-uploads-python) keep reserved
+[Admission-enabled uploads](#admission-enabled-uploads) keep reserved
 filenames immutable; changing an admitted file requires a fresh UCID and the
 metadata updates described there.
 
@@ -196,7 +196,7 @@ python3 aws/python/upload_and_fetch.py --ucid --batch <category> <ucid> <metadat
 python3 aws/python/upload_and_fetch.py --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>
 ```
 
-### Admission-enabled uploads (Python)
+### Admission-enabled uploads
 
 If your supplied configuration includes an upload function, also set:
 
@@ -204,8 +204,10 @@ If your supplied configuration includes an upload function, also set:
 export MAXIMIZER_UPLOAD_FUNCTION='<upload-function-from-your-configuration>'
 ```
 
-Use the Python commands above with this setting. Keep `admitted_upload.py`
-beside `upload_and_fetch.py`. These credentials require admission before a file
+Python, JavaScript, and Java use this setting with their normal command-line
+arguments. Python needs `admitted_upload.py` beside its client. Keep the complete
+`aws/javascript/` or `aws/java/` directory when using those languages, including
+their helper files and dependency manifests. These credentials require admission before a file
 is stored and cannot perform direct S3 writes. Uploads use temporary, reserved
 transfer URLs; each completed filename is create-only. Use a new UCID for a
 new test, and do not log or share transfer URLs.
@@ -233,9 +235,10 @@ Results still use the configured S3 polling or SQS notification flow.
 Organisation roster updates require a separately authorized upload channel;
 the recording-transfer function rejects those updates.
 
-This optional transport is currently implemented in Python. The JavaScript
-and Java clients require direct-ingest credentials; they do not support
-`MAXIMIZER_UPLOAD_FUNCTION`.
+All three clients use the same request identity for identical destination names
+and file bytes. Keep the supplied function setting when using restricted
+credentials. Omitting it selects the original direct-S3 mode, which requires
+separately authorized direct-ingest credentials.
 
 The following examples show the argument forms. Except for the linked org
 samples, their local filenames are placeholders. Prepare metadata for the
@@ -255,8 +258,14 @@ node aws/javascript/upload_and_fetch.mjs --ucid category_a call001 ./metadata.js
 mvn -f aws/java/pom.xml compile exec:java -Dexec.args="--ucid category_a call001 ./metadata.json ./call.wav"
 ```
 
-JavaScript requires `@aws-sdk/client-s3`, `@aws-sdk/client-sqs`, and
-`@aws-sdk/lib-storage`.
+Install the JavaScript dependencies from its lockfile before running it:
+
+```bash
+npm ci --prefix aws/javascript
+```
+
+The JavaScript package includes the S3, SQS, Lambda, and multipart-upload AWS
+SDK dependencies. Use Node.js 22 or later.
 
 Java requires JDK 11 or later and Maven 3.6.3 or later. The bundled
 [AWS Maven build](aws/java/pom.xml) pins the AWS SDK and Jackson dependencies;
@@ -268,8 +277,9 @@ mvn --batch-mode --no-transfer-progress -f aws/java/pom.xml compile
 mvn --batch-mode --no-transfer-progress -f gcp/java/pom.xml compile
 ```
 
-Compilation downloads the public dependencies. The GitHub compile checks build
-both examples on JDK 11 and 17 without cloud credentials. Running an example
+Compilation downloads the public dependencies. The GitHub checks build both
+Java examples on JDK 11 and 17 and test the AWS upload behavior without cloud
+credentials. JavaScript upload checks run on Node.js 22 and 24. Running an example
 uses the environment variables supplied at onboarding.
 
 `aws/python/consumer.py` continuously downloads results named in completion

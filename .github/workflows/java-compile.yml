@@ -1,4 +1,4 @@
-name: Java example compile checks
+name: Java example build and upload tests
 
 on:
   pull_request:
@@ -27,5 +27,5 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
-      - name: Compile with pinned dependencies
-        run: mvn --batch-mode --no-transfer-progress -f ${{ matrix.example }}/java/pom.xml compile
+      - name: Compile and test with pinned dependencies
+        run: mvn --batch-mode --no-transfer-progress -f ${{ matrix.example }}/java/pom.xml test
