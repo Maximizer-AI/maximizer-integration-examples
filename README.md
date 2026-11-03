@@ -69,8 +69,11 @@ directly. It is never published here.
 The clients check that metadata is one JSON object of at most 1 MiB, with no
 duplicate keys, `NaN`, or `Infinity`. A UTF-8 BOM is tolerated. `ucid` must
 match the call id argument. `audio_files` must list the uploaded filenames
-without folders, exactly in part order. If the file is refused, the call is
-held until a corrected file arrives under the same name.
+without folders, exactly in part order. With direct-ingest credentials, a call
+rejected during processing can wait for a corrected file under the same name.
+[Admission-enabled uploads](#admission-enabled-uploads-python) keep reserved
+filenames immutable; changing an admitted file requires a fresh UCID and the
+metadata updates described there.
 
 ### The daily org file and users list
 
@@ -135,7 +138,7 @@ for an upload test.
 ### Upload the demo
 
 1. Clone or download this repository. Run the commands from its root folder.
-2. Install the Python dependency: `python3 -m pip install boto3`.
+2. Use Python 3.10 or later and install `boto3`: `python3 -m pip install boto3`.
 3. Set the [AWS environment variables](#running-the-examples), including
    `MAXIMIZER_METADATA_SUFFIX` to the full metadata ending agreed at onboarding.
    The demo's local filename, `metadata.json`, does not supply that ending.
@@ -182,7 +185,8 @@ export MAXIMIZER_RESULTS_QUEUE_URL='<queue-url>'
 export MAXIMIZER_METADATA_SUFFIX='<metadata-file-suffix-agreed-at-onboarding>'
 ```
 
-Install `boto3` for Python. For a complete example with included files, follow
+The AWS Python examples require Python 3.10 or later and `boto3`. For a complete
+example with included files, follow
 [Upload the demo](#upload-the-demo). The CLI signatures are:
 
 ```text
@@ -191,6 +195,47 @@ python3 aws/python/upload_and_fetch.py --ucid <category> <ucid> <metadata.json> 
 python3 aws/python/upload_and_fetch.py --ucid --batch <category> <ucid> <metadata.json> <audio...>
 python3 aws/python/upload_and_fetch.py --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>
 ```
+
+### Admission-enabled uploads (Python)
+
+If your supplied configuration includes an upload function, also set:
+
+```bash
+export MAXIMIZER_UPLOAD_FUNCTION='<upload-function-from-your-configuration>'
+```
+
+Use the Python commands above with this setting. Keep `admitted_upload.py`
+beside `upload_and_fetch.py`. These credentials require admission before a file
+is stored and cannot perform direct S3 writes. Uploads use temporary, reserved
+transfer URLs; each completed filename is create-only. Use a new UCID for a
+new test, and do not log or share transfer URLs.
+
+A quota rejection reports `429` and a retry delay. Wait for that delay before
+starting another upload. Network retries of a reserved part reuse its existing
+reservation. Restarting the exact same command and unchanged file resumes a
+valid reserved transfer. If the service already confirmed completion, the
+command skips the file transfer.
+
+An incomplete reservation lasts 15 minutes. A request that never received a
+transfer reservation may remain unrecoverable after an uncertain service
+failure. Expired or unrecoverable incomplete requests need a fresh UCID; their
+filenames stay reserved even if no file was stored. Changed or corrected file
+contents also need a fresh UCID. Pass that new UCID to the command, update the
+metadata's `ucid` and `audio_files` to its new uploaded filenames in part order,
+and rename any UCID-named metadata file accordingly. See
+[call-id naming](#call-id-naming-mode). Contact Maximizer with the UCID if
+completion is unclear before replacing an uncertain upload.
+
+The client never falls back to direct S3 on admission failure.
+Temporary service failures and in-progress reservations get at most two short
+retries using the same request; quota and filename-conflict rejections do not.
+Results still use the configured S3 polling or SQS notification flow.
+Organisation roster updates require a separately authorized upload channel;
+the recording-transfer function rejects those updates.
+
+This optional transport is currently implemented in Python. The JavaScript
+and Java clients require direct-ingest credentials; they do not support
+`MAXIMIZER_UPLOAD_FUNCTION`.
 
 The following examples show the argument forms. Except for the linked org
 samples, their local filenames are placeholders. Prepare metadata for the

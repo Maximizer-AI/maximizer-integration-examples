@@ -77,7 +77,19 @@ def _clients(region: str):
         aws_secret_access_key=os.environ["MAXIMIZER_AWS_SECRET_ACCESS_KEY"],
         config=Config(retries={"max_attempts": 5, "mode": "standard"}),
     )
-    return boto3.client("s3", **creds), boto3.client("sqs", **creds)
+    s3 = boto3.client("s3", **creds)
+    if os.environ.get("MAXIMIZER_UPLOAD_FUNCTION"):
+        # Resolve only the trusted adjacent source, including under Python -I
+        # (which intentionally omits the script directory from sys.path).
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location("maximizer_admitted_upload",
+            Path(__file__).with_name("admitted_upload.py"))
+        transport = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(transport)
+        s3 = transport.AdmittedUploads(s3, boto3.client("lambda", **creds),
+                                      os.environ["MAXIMIZER_UPLOAD_FUNCTION"], region)
+    return s3, boto3.client("sqs", **creds)
 
 
 def _check_ucid(ucid: str) -> None:
@@ -173,6 +185,21 @@ def _wait_for_result(s3, sqs, results_bucket: str, result_key: str) -> None:
     queue_url = os.environ.get("MAXIMIZER_RESULTS_QUEUE_URL")
     deadline = time.time() + 15 * 60
     out_path = os.path.basename(result_key)
+    admitted_queue = bool(queue_url and os.environ.get("MAXIMIZER_UPLOAD_FUNCTION"))
+    def existing_result():
+        try:
+            s3.head_object(Bucket=results_bucket, Key=result_key)
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
+        s3.download_file(results_bucket, result_key, out_path)
+        print(f"result ready: {results_bucket}/{result_key} -> {out_path}")
+        return True
+    # A completed replay emits no new notification. Its result may already
+    # exist, or become available after another consumer takes the first message.
+    if admitted_queue and existing_result():
+        return
     if queue_url:
         print(f"waiting for the file_status notification for {result_key} on {queue_url}")
         while time.time() < deadline:
@@ -185,6 +212,8 @@ def _wait_for_result(s3, sqs, results_bucket: str, result_key: str) -> None:
                 sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
                 print(f"result ready ({status['status']} at {status['message_timestamp']}): "
                       f"{results_bucket}/{result_key} -> {out_path}")
+                return
+            if admitted_queue and existing_result():
                 return
         sys.exit("timed out waiting for the notification — contact Maximizer with the UCID")
     print(f"waiting for {results_bucket}/{result_key}")

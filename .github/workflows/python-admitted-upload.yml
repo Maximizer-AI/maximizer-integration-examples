@@ -1,0 +1,41 @@
+name: Python admitted upload tests
+
+on:
+  pull_request:
+    paths:
+      - 'aws/python/**'
+      - '.github/workflows/python-admitted-upload.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'aws/python/**'
+      - '.github/workflows/python-admitted-upload.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  transport-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    env:
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the pinned SDK for import compatibility
+        run: python -m pip install --disable-pip-version-check boto3==1.43.123
+      - name: Parse clients and import the SDK without configuring cloud clients
+        run: |
+          python -m compileall -q aws/python
+          python -c "import boto3, botocore, runpy; runpy.run_path('aws/python/upload_and_fetch.py', run_name='sdk_import_check')"
+      - name: Reserved transfer and retry tests without network access
+        run: python -m unittest discover -s aws/python -p test_admitted_upload.py -v
