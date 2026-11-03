@@ -41,3 +41,27 @@ export async function waitForCompletion({ head, download, receive, remove, resul
   }
   throw new Error("timed out waiting for result — contact Maximizer with the UCID");
 }
+
+
+// Explicit result retrieval is independent of upload transport and SQS.
+export async function waitForResultOnly({ head, download, now = Date.now,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  const deadline = now() + 15 * 60 * 1000;
+  while (now() < deadline) {
+    try {
+      await head();
+      await download();
+      return;
+    } catch (error) {
+      const code = error?.name || error?.Code || error?.code;
+      const status = error?.$metadata?.httpStatusCode;
+      const missing = status === 404 || ((status === undefined || status === 0) && ["404", "NoSuchKey", "NotFound"].includes(code));
+      if (!missing) {
+        const detail = Number.isInteger(status) && status >= 100 && status <= 599 ? ` (HTTP ${status})` : "";
+        throw new Error(`Result read failed${detail}; check result-read access or retry the result-only command`);
+      }
+    }
+    await sleep(15000);
+  }
+  throw new Error("timed out waiting for result — contact Maximizer with the UCID");
+}

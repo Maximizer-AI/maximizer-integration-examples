@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { Socket } from "node:net";
 import { AdmittedUploads, putPart } from "./admitted_upload.mjs";
-import { waitForCompletion } from "./result_waiter.mjs";
+import { waitForCompletion, waitForResultOnly } from "./result_waiter.mjs";
 
 // Any accidental real network use fails this entire offline suite.
 let originalConnect;
@@ -278,4 +278,89 @@ test("malformed notification failure never prints its body or deletes a message"
   f.options.receive = async () => ({Messages:[{Body:"https://private.invalid/secret signed body",ReceiptHandle:"owned"}]});
   await assert.rejects(waitForCompletion(f.options), e => e.message === "Invalid result notification; no queue message was deleted");
   assert.equal(f.counts.download,0); assert.equal(f.counts.remove,0);
+});
+
+
+async function runResultOnlyCli(t, mode = "present", ucid = "callonly001") {
+  const dir = await mkdtemp(join(tmpdir(), "maximizer-result-only-"));
+  t.after(() => rm(dir, {recursive:true,force:true}));
+  await writeFile(join(dir,"loader.mjs"), `export async function resolve(name, context, next) {
+    if (name.startsWith("@aws-sdk/")) return {url:new URL("./sdk.mjs",import.meta.url).href,shortCircuit:true};
+    return next(name,context);
+  }`);
+  await writeFile(join(dir,"sdk.mjs"), String.raw`
+    import {appendFileSync} from "node:fs";
+    import {Socket} from "node:net";
+    Socket.prototype.connect=function(){throw new Error("Offline result-only test forbids network");};
+    const trace=op=>appendFileSync(process.env.JS_TEST_TRACE,JSON.stringify({op})+"\n");
+    const timer=globalThis.setTimeout;
+    globalThis.setTimeout=(fn,ms,...args)=>timer(fn,ms===15000?0:ms,...args);
+    export class GetObjectCommand{constructor(input){this.input=input;}}
+    export class HeadObjectCommand{constructor(input){this.input=input;}}
+    export class ReceiveMessageCommand{constructor(){throw new Error("SQS forbidden");}}
+    export class DeleteMessageCommand{constructor(){throw new Error("SQS forbidden");}}
+    export class InvokeCommand{constructor(){throw new Error("Lambda forbidden");}}
+    export class SQSClient{constructor(){throw new Error("SQS construction forbidden");}}
+    export class LambdaClient{constructor(){throw new Error("Lambda construction forbidden");}}
+    export class Upload{constructor(){throw new Error("Upload forbidden");}}
+    let heads=0;
+    export class S3Client{
+      constructor(options){if(options.maxAttempts!==1)throw new Error("Unexpected SDK retries");trace('S3Client');}
+      async send(command,options){
+        if(command.input.Bucket!=='demo-results'||command.input.Key!=='category_a/callonly001.json')throw new Error('Unexpected result key');
+        if(!options.abortSignal)throw new Error('No bounded request signal');
+        trace(command.constructor.name);
+        if(command instanceof HeadObjectCommand){
+          heads++;
+          if(process.env.JS_TEST_MODE==='denied')throw Object.assign(new Error('PRIVATE_ERROR_BODY'),{name:'NotFound',$metadata:{httpStatusCode:403}});
+          if(process.env.JS_TEST_MODE==='pending'&&heads===1)throw Object.assign(new Error('missing'),{name:'NoSuchKey',$metadata:{httpStatusCode:404}});
+          return {};
+        }
+        if(!(command instanceof GetObjectCommand))throw new Error('Non-read request forbidden');
+        if(process.env.JS_TEST_MODE==='get-failure')throw new Error('PRIVATE_NETWORK_URL');
+        return {Body:{transformToByteArray:async()=>Buffer.from('{"private-result":"do-not-print"}')}};
+      }
+      destroy(){trace('destroy');}
+    }
+  `);
+  const fs = await import("node:fs/promises");
+  await writeFile(join(dir,"outside.json"),"owned-outside-unchanged");
+  if (mode === "get-failure") await writeFile(join(dir,"callonly001.json"),"old-owned-result");
+  else await fs.symlink(join(dir,"outside.json"),join(dir,"callonly001.json"));
+  const env={PATH:process.env.PATH,MAXIMIZER_AWS_REGION:region,MAXIMIZER_AWS_ACCESS_KEY_ID:"synthetic",MAXIMIZER_AWS_SECRET_ACCESS_KEY:"synthetic",
+    MAXIMIZER_RESULTS_BUCKET:"demo-results",MAXIMIZER_RESULTS_QUEUE_URL:"SQS-TRAP",MAXIMIZER_UPLOAD_FUNCTION:"LAMBDA-TRAP",
+    JS_TEST_TRACE:join(dir,"trace.jsonl"),JS_TEST_MODE:mode};
+  const child=spawnSync(process.execPath,["--no-warnings","--experimental-loader",join(dir,"loader.mjs"),
+    fileURLToPath(new URL("./upload_and_fetch.mjs",import.meta.url)),"--result-only","category_a",ucid],{cwd:dir,env,encoding:"utf8",timeout:10000});
+  assert.ok(!child.error,child.error?.message);
+  let trace=[];try{trace=(await readFile(join(dir,"trace.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);}catch(error){if(error.code!=="ENOENT")throw error;}
+  return {child,trace,dir};
+}
+for(const mode of ["present","pending"])test(`actual result-only CLI ${mode} needs only S3 read config and ignores upload/queue settings`,async t=>{
+  const {child,trace,dir}=await runResultOnlyCli(t,mode);
+  assert.equal(child.status,0,child.stderr);
+  assert.deepEqual(trace.map(x=>x.op),mode==="pending"?["S3Client","HeadObjectCommand","HeadObjectCommand","GetObjectCommand","destroy"]:["S3Client","HeadObjectCommand","GetObjectCommand","destroy"]);
+  assert.equal(await readFile(join(dir,"callonly001.json"),"utf8"),'{"private-result":"do-not-print"}');
+  const fs=await import("node:fs/promises");assert.equal((await fs.stat(join(dir,"callonly001.json"))).mode&0o777,0o600);
+  assert.equal(await readFile(join(dir,"outside.json"),"utf8"),"owned-outside-unchanged");
+  assert.doesNotMatch(child.stdout,/do-not-print/);
+});
+test("actual result-only CLI HTTP403 wins over misleading NotFound and does not poll",async t=>{
+  const {child,trace}=await runResultOnlyCli(t,"denied");assert.equal(child.status,1);
+  assert.deepEqual(trace.map(x=>x.op),["S3Client","HeadObjectCommand","destroy"]);
+  assert.match(child.stderr,/HTTP 403/);assert.doesNotMatch(child.stderr,/PRIVATE_ERROR_BODY/);
+});
+test("actual result-only CLI unexpected GET failure preserves existing file and sanitizes errors",async t=>{
+  const {child,trace,dir}=await runResultOnlyCli(t,"get-failure");assert.equal(child.status,1);
+  assert.deepEqual(trace.map(x=>x.op),["S3Client","HeadObjectCommand","GetObjectCommand","destroy"]);
+  assert.equal(await readFile(join(dir,"callonly001.json"),"utf8"),"old-owned-result");assert.doesNotMatch(child.stderr,/PRIVATE_NETWORK_URL/);
+});
+for(const ucid of ["../private","unsafe\\path","C:drive","line\nend"])test("result-only validation precedes even S3 construction",async t=>{
+  const {child,trace}=await runResultOnlyCli(t,"present",ucid);assert.equal(child.status,1);assert.deepEqual(trace,[]);
+});
+test("result-only missing objects have a bounded polling deadline",async()=>{
+  let time=0,heads=0;
+  await assert.rejects(waitForResultOnly({now:()=>time,sleep:async ms=>{time+=ms;},
+    head:async()=>{heads++;throw missing();},download:async()=>assert.fail("Missing result cannot download")}),/timed out/);
+  assert.equal(time,900000);assert.equal(heads,60);
 });

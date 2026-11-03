@@ -17,6 +17,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -55,6 +58,19 @@ public class UploadAndFetch {
                     env("MAXIMIZER_AWS_ACCESS_KEY_ID"), env("MAXIMIZER_AWS_SECRET_ACCESS_KEY"))))
                 .build();
         }
+        S3Client resultS3(String region) {
+            // Result-only reads never hide access/network failures behind SDK retries.
+            return S3Client.builder().region(Region.of(region))
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
+                    env("MAXIMIZER_AWS_ACCESS_KEY_ID"), env("MAXIMIZER_AWS_SECRET_ACCESS_KEY"))))
+                .overrideConfiguration(configuration -> configuration
+                    .retryPolicy(software.amazon.awssdk.core.retry.RetryPolicy.builder(
+                        software.amazon.awssdk.core.retry.RetryMode.STANDARD).numRetries(0).build())
+                    .apiCallAttemptTimeout(Duration.ofSeconds(30)).apiCallTimeout(Duration.ofSeconds(30)))
+                .build();
+        }
+        long resultTimeMillis() { return System.nanoTime() / 1_000_000; }
+        void resultPollSleep(long milliseconds) throws InterruptedException { Thread.sleep(milliseconds); }
         SqsClient sqs(String region) {
             return SqsClient.builder().region(Region.of(region))
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
@@ -81,7 +97,8 @@ public class UploadAndFetch {
         "usage:",
         "  UploadAndFetch <category> <audio_file>",
         "  UploadAndFetch --ucid [--batch] <category> <UCID> <metadata.json> <audio> [<audio> ...]",
-        "  UploadAndFetch --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>");
+        "  UploadAndFetch --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>",
+        "  UploadAndFetch --result-only <category> <UCID>");
 
     static final java.util.regex.Pattern ORG_NAME =
         java.util.regex.Pattern.compile("(org|users)_(\\d{4}-\\d{2}-\\d{2})\\.json");
@@ -199,6 +216,87 @@ public class UploadAndFetch {
         return false;
     }
 
+    /** Read an existing call result without any upload or queue interaction. */
+    static void resultOnly(String category, String ucid) throws Exception {
+        checkCategory(category);
+        if (ucid.isEmpty() || ucid.contains("/") || ucid.contains("__") || ucid.matches(".+-\\d+"))
+            fail(ucid + ": a UCID may not be empty, contain '/' or '__', or end in -<digits>");
+        // These names must remain one local filename on Windows as well as POSIX.
+        if (ucid.contains("\\") || ucid.contains(":") || ucid.chars().anyMatch(c -> c < 32 || c == 127))
+            fail("result UCID may not contain backslashes, colons or control characters");
+        Path out = Paths.get(ucid + ".json").toAbsolutePath();
+        String region = env("MAXIMIZER_AWS_REGION");
+        String bucket = env("MAXIMIZER_RESULTS_BUCKET");
+        String key = category + "/" + ucid + ".json";
+        long deadline = clients.resultTimeMillis() + 15 * 60 * 1000L;
+        // Deliberately do not inspect the input bucket, queue or upload function.
+        try (S3Client s3 = clients.resultS3(region)) {
+            while (clients.resultTimeMillis() < deadline) {
+                try {
+                    Duration timeout = resultReadTimeout(deadline);
+                    s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key)
+                        .overrideConfiguration(request -> request.apiCallAttemptTimeout(timeout).apiCallTimeout(timeout)).build());
+                    downloadResultOnly(s3, bucket, key, out, deadline);
+                    System.out.printf("result ready: %s/%s -> %s%n", bucket, key, out.getFileName());
+                    return;
+                } catch (S3Exception error) {
+                    if (!resultNotFound(error)) throw error;
+                }
+                long remaining = deadline - clients.resultTimeMillis();
+                if (remaining > 0) clients.resultPollSleep(Math.min(15000, remaining));
+            }
+        } catch (ResultOnlyTimeout error) {
+            throw new ResultOnlyTimeout();
+        } catch (S3Exception error) {
+            throw new IllegalStateException("Result retrieval failed"
+                + (error.statusCode() > 0 ? ": HTTP " + error.statusCode() : "")
+                + "; check result access, network and UCID; no upload was attempted");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Result retrieval interrupted; no upload was attempted");
+        } catch (Exception error) {
+            throw new IllegalStateException("Result retrieval failed; check result access, network and UCID; no upload was attempted");
+        }
+        throw new ResultOnlyTimeout();
+    }
+
+    static final class ResultOnlyTimeout extends IllegalStateException {
+        ResultOnlyTimeout() { super("timed out waiting for result — contact Maximizer with the UCID"); }
+    }
+
+    static boolean resultNotFound(S3Exception error) {
+        if (error.statusCode() == 404) return true;
+        // A known access/server error must never be disguised as pending work.
+        if (error.statusCode() > 0) return false;
+        String code = error.awsErrorDetails() == null ? null : error.awsErrorDetails().errorCode();
+        return "404".equals(code) || "NoSuchKey".equals(code) || "NotFound".equals(code);
+    }
+
+    static Duration resultReadTimeout(long deadline) {
+        long remaining = deadline - clients.resultTimeMillis();
+        if (remaining <= 0) throw new ResultOnlyTimeout();
+        return Duration.ofMillis(Math.min(30000, remaining));
+    }
+
+    static void downloadResultOnly(S3Client s3, String bucket, String key, Path out, long deadline) throws Exception {
+        Path parent = out.getParent();
+        Path temporary = Files.getFileStore(parent).supportsFileAttributeView("posix")
+            ? Files.createTempFile(parent, ".maximizer-result-", ".partial",
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+            : Files.createTempFile(parent, ".maximizer-result-", ".partial");
+        try {
+            Duration timeout = resultReadTimeout(deadline);
+            try (java.io.OutputStream stream = Files.newOutputStream(temporary)) {
+                s3.getObject(GetObjectRequest.builder().bucket(bucket).key(key)
+                    .overrideConfiguration(request -> request.apiCallAttemptTimeout(timeout).apiCallTimeout(timeout)).build(),
+                    ResponseTransformer.toOutputStream(stream));
+            }
+            Files.move(temporary, out, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
     /** The SDK refuses to overwrite an existing file; a rerun for the same call must. */
     static Path fresh(Path path) throws Exception {
         Files.deleteIfExists(path);
@@ -249,6 +347,11 @@ public class UploadAndFetch {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && args[0].equals("--result-only")) {
+            if (args.length != 3) fail(USAGE);
+            resultOnly(args[1], args[2]);
+            return;
+        }
         if (args.length == 3 && args[0].equals("--org")) {
             uploadOrgFiles(Paths.get(args[1]), Paths.get(args[2]));
             return;

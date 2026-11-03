@@ -8,6 +8,8 @@ import math
 import os
 import re
 import sys
+import shutil
+import tempfile
 import time
 import boto3
 from botocore.config import Config
@@ -229,6 +231,56 @@ def _wait_for_result(s3, sqs, results_bucket: str, result_key: str) -> None:
     sys.exit("timed out waiting for result — contact Maximizer with the UCID")
 
 
+
+def fetch_result_only(category: str, ucid: str) -> None:
+    """Read the existing curated call result; never create upload/Lambda/SQS clients."""
+    check_category(category)
+    _check_ucid(ucid)
+    if any(ch in ucid for ch in "\\:") or any(ord(ch) < 32 or ord(ch) == 127 for ch in ucid):
+        sys.exit("UCID contains a character unsafe for a local result filename")
+    region = os.environ["MAXIMIZER_AWS_REGION"]
+    bucket = os.environ["MAXIMIZER_RESULTS_BUCKET"]
+    s3 = boto3.client("s3", region_name=region,
+        aws_access_key_id=os.environ["MAXIMIZER_AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["MAXIMIZER_AWS_SECRET_ACCESS_KEY"],
+        config=Config(connect_timeout=5, read_timeout=30, retries={"total_max_attempts": 1, "mode": "standard"}))
+    key = f"{category}/{ucid}.json"
+    out_path = ucid + ".json"
+    deadline = time.time() + 15 * 60
+    while time.time() < deadline:
+        temporary = None
+        try:
+            s3.head_object(Bucket=bucket, Key=key)
+            response = s3.get_object(Bucket=bucket, Key=key)
+            body = response["Body"]
+            try:
+                fd, temporary = tempfile.mkstemp(prefix=".maximizer-result-", suffix=".json", dir=".")
+                with os.fdopen(fd, "wb") as stream:
+                    shutil.copyfileobj(body, stream)
+                os.replace(temporary, out_path)
+            finally:
+                body.close()
+            print(f"result ready: {bucket}/{key} -> {out_path}")
+            return
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            missing = status == 404 or (status in (None, 0) and code in ("404", "NoSuchKey", "NotFound"))
+            if not missing:
+                detail = f" (HTTP {status or code})" if str(status or code).isdigit() else ""
+                raise RuntimeError("Result read failed" + detail + "; check result-read access or retry the result-only command") from None
+        except Exception:
+            raise RuntimeError("Result read failed; check result-read access or retry the result-only command") from None
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+        time.sleep(15)
+    sys.exit("timed out waiting for result — contact Maximizer with the UCID")
+
+
 def main(category: str, audio_path: str) -> None:
     check_category(category)
     if not _extension_is_accepted(audio_path):
@@ -251,11 +303,14 @@ def main(category: str, audio_path: str) -> None:
 USAGE = """usage:
   upload_and_fetch.py <category> <audio_file>
   upload_and_fetch.py --ucid [--batch] <category> <UCID> <metadata.json> <audio> [<audio> ...]
-  upload_and_fetch.py --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>"""
+  upload_and_fetch.py --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>
+  upload_and_fetch.py --result-only <category> <UCID>"""
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    if args[:1] == ["--org"] and len(args) == 3:
+    if args[:1] == ["--result-only"] and len(args) == 3:
+        fetch_result_only(args[1], args[2])
+    elif args[:1] == ["--org"] and len(args) == 3:
         upload_org_files(args[1], args[2])
     elif args[:1] == ["--ucid"]:
         args = args[1:]
