@@ -194,7 +194,34 @@ python3 aws/python/upload_and_fetch.py <category> <audio>
 python3 aws/python/upload_and_fetch.py --ucid <category> <ucid> <metadata.json> <audio...>
 python3 aws/python/upload_and_fetch.py --ucid --batch <category> <ucid> <metadata.json> <audio...>
 python3 aws/python/upload_and_fetch.py --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>
+python3 aws/python/upload_and_fetch.py --result-only <category> <UCID>
 ```
+
+### Download a result without uploading
+
+Use `--result-only <category> <UCID>` in the current clients to retrieve the
+most recently stored `<category>/<UCID>.json` directly from S3. This works with
+legacy and admission-enabled read credentials even if another consumer has
+already taken the completion notification. Do not rerun a legacy upload just
+to retrieve its result.
+
+Only the access key, secret key, AWS region and results bucket settings above
+are needed. Input-bucket, upload-function and queue settings are ignored in
+this mode. After installing the dependencies below, run from a private output
+folder, replacing `/path/to/checkout` with the repository location:
+
+```bash
+python3 /path/to/checkout/aws/python/upload_and_fetch.py --result-only category_a call001
+node /path/to/checkout/aws/javascript/upload_and_fetch.mjs --result-only category_a call001
+mvn -f /path/to/checkout/aws/java/pom.xml compile exec:java -Dexec.args="--result-only category_a call001"
+```
+
+The command writes `call001.json` locally and waits up to 15 minutes if the
+result is not yet available. Permission and unexpected service errors fail
+immediately. It does not upload, invoke processing, or read/delete queue
+messages. An existing result does not prove that a later overwrite under the
+same UCID has finished processing. Older client copies must be updated before
+using this new option; existing upload commands keep their current behavior.
 
 ### Admission-enabled uploads
 

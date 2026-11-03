@@ -1,3 +1,5 @@
+import { mkdtemp, rename, rm } from "node:fs/promises";
+import { join } from "node:path";
 // Upload recordings and metadata, then download the completion result.
 // See README.md and package.json for the required AWS SDK dependencies.
 import { readFile, writeFile } from "node:fs/promises";
@@ -7,7 +9,7 @@ import { S3Client, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s
 import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } from "@aws-sdk/client-sqs";
 import { Upload } from "@aws-sdk/lib-storage";
 import { AdmittedUploads } from "./admitted_upload.mjs";
-import { waitForCompletion } from "./result_waiter.mjs";
+import { waitForCompletion, waitForResultOnly } from "./result_waiter.mjs";
 
 function checkCategory(category) {
   if ((!category || /[^a-z0-9_]/.test(category)) || category.includes("__"))
@@ -196,14 +198,45 @@ async function uploadOrgFiles(orgPath, usersPath) {
   console.log("upload complete (org files produce no result file)");
 }
 
+
+async function fetchResultOnly(category, ucid) {
+  checkCategory(category);
+  if (!ucid || ucid.includes("/") || ucid.includes("__") || /.+-\d+$/.test(ucid))
+    throw new Error("Invalid UCID for result retrieval");
+  if (/[\\:\x00-\x1f\x7f]/.test(ucid)) throw new Error("UCID contains a character unsafe for a local result filename");
+  const region = env("MAXIMIZER_AWS_REGION"), bucket = env("MAXIMIZER_RESULTS_BUCKET");
+  const s3 = new S3Client({ region, maxAttempts: 1, credentials: {
+    accessKeyId: env("MAXIMIZER_AWS_ACCESS_KEY_ID"), secretAccessKey: env("MAXIMIZER_AWS_SECRET_ACCESS_KEY")
+  } });
+  const key = `${category}/${ucid}.json`, output = `${ucid}.json`;
+  try {
+    await waitForResultOnly({
+      head: () => s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }), { abortSignal: AbortSignal.timeout(30000) }),
+      download: async () => {
+        const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }), { abortSignal: AbortSignal.timeout(30000) });
+        const bytes = await response.Body.transformToByteArray();
+        const temporary = await mkdtemp(join(process.cwd(), ".maximizer-result-"));
+        try {
+          const file = join(temporary, "result.json");
+          await writeFile(file, bytes, { mode: 0o600, flag: "wx" });
+          await rename(file, output);
+        } finally { await rm(temporary, { recursive: true, force: true }); }
+      }
+    });
+    console.log(`result ready: ${bucket}/${key} -> ${output}`);
+  } finally { s3.destroy(); }
+}
+
 const USAGE = `usage:
   node upload_and_fetch.mjs <category> <audio_file>
   node upload_and_fetch.mjs --ucid [--batch] <category> <UCID> <metadata.json> <audio> [<audio> ...]
-  node upload_and_fetch.mjs --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>`;
+  node upload_and_fetch.mjs --org <org_YYYY-MM-DD.json> <users_YYYY-MM-DD.json>
+  node upload_and_fetch.mjs --result-only <category> <UCID>`;
 
 let args = process.argv.slice(2);
 let run;
-if (args[0] === "--org" && args.length === 3) run = uploadOrgFiles(args[1], args[2]);
+if (args[0] === "--result-only" && args.length === 3) run = fetchResultOnly(args[1], args[2]);
+else if (args[0] === "--org" && args.length === 3) run = uploadOrgFiles(args[1], args[2]);
 else if (args[0] === "--ucid") {
   args = args.slice(1);
   const batch = args[0] === "--batch";

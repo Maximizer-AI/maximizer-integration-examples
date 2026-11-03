@@ -252,5 +252,95 @@ class AdmittedResultReplayTests(unittest.TestCase):
         self.sqs.delete_message.assert_called_once()
 
 
+class ResultOnlyCliTests(unittest.TestCase):
+    def run_cli(self, client, *, args=None):
+        import contextlib, os, runpy, sys
+        environment = {'MAXIMIZER_AWS_REGION': 'eu-central-1', 'MAXIMIZER_AWS_ACCESS_KEY_ID': 'synthetic',
+            'MAXIMIZER_AWS_SECRET_ACCESS_KEY': 'synthetic', 'MAXIMIZER_RESULTS_BUCKET': 'demo-results',
+            'MAXIMIZER_RESULTS_QUEUE_URL': 'must-not-contact-queue', 'MAXIMIZER_UPLOAD_FUNCTION': 'must-not-invoke'}
+        output = io.StringIO()
+        def only_s3(service, **kwargs):
+            self.assertEqual(service, 's3')
+            self.assertEqual(kwargs['config'].retries['total_max_attempts'], 1)
+            return client
+        with patch.dict(os.environ, environment, clear=True), patch.object(sys, 'argv',
+                ['upload_and_fetch.py', '--result-only', *(args or ['category_a', 'callonly001'])]), \
+                patch.object(published_client.boto3, 'client', side_effect=only_s3) as factory, \
+                patch.object(published_client.time, 'sleep') as sleep, contextlib.redirect_stdout(output):
+            runpy.run_path(str(Path(published_client.__file__)), run_name='__main__')
+        return factory, sleep, output.getvalue()
+
+    def test_actual_result_only_cli_ignores_upload_and_queue_and_replaces_symlink_privately(self):
+        import os, stat
+        client = Mock(spec=['head_object', 'get_object'])
+        data = b'{"private-result":"do-not-print"}'
+        client.get_object.return_value = {'Body': io.BytesIO(data)}
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / 'outside.json'; outside.write_bytes(b'unchanged')
+            work = Path(directory) / 'work'; work.mkdir(); os.chdir(work)
+            try:
+                Path('callonly001.json').symlink_to(outside)
+                factory, sleep, output = self.run_cli(client)
+                factory.assert_called_once(); sleep.assert_not_called()
+                client.head_object.assert_called_once_with(Bucket='demo-results', Key='category_a/callonly001.json')
+                client.get_object.assert_called_once_with(Bucket='demo-results', Key='category_a/callonly001.json')
+                self.assertEqual(Path('callonly001.json').read_bytes(), data)
+                self.assertFalse(Path('callonly001.json').is_symlink())
+                self.assertEqual(stat.S_IMODE(Path('callonly001.json').stat().st_mode), 0o600)
+                self.assertEqual(outside.read_bytes(), b'unchanged')
+                self.assertNotIn('do-not-print', output)
+            finally: os.chdir(previous)
+
+    def test_result_only_pending404_polls_then_gets_without_any_other_client(self):
+        import os
+        client = Mock(spec=['head_object', 'get_object'])
+        client.head_object.side_effect = [ClientError({'Error': {'Code': '404'}}, 'HeadObject'), {}]
+        client.get_object.return_value = {'Body': io.BytesIO(b'{}')}
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                _, sleep, _ = self.run_cli(client)
+                sleep.assert_called_once_with(15)
+                self.assertEqual(client.head_object.call_count, 2)
+                client.get_object.assert_called_once()
+            finally: os.chdir(previous)
+
+    def test_result_only403_fails_immediately_without_printing_error_body(self):
+        client = Mock(spec=['head_object', 'get_object'])
+        client.head_object.side_effect = ClientError({'Error': {'Code': 'NotFound', 'Message': 'private-error-body'},
+            'ResponseMetadata': {'HTTPStatusCode': 403}}, 'HeadObject')
+        with self.assertRaisesRegex(RuntimeError, 'HTTP 403') as caught:
+            self.run_cli(client)
+        self.assertNotIn('private-error-body', str(caught.exception))
+        client.get_object.assert_not_called()
+        self.assertEqual(client.head_object.call_count, 1)
+
+    def test_result_only_failed_get_preserves_existing_file_and_leaves_no_temp(self):
+        import os
+        client = Mock(spec=['head_object', 'get_object'])
+        client.get_object.side_effect = OSError('private-network-url')
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                Path('callonly001.json').write_bytes(b'old-owned-file')
+                with self.assertRaisesRegex(RuntimeError, 'Result read failed') as caught:
+                    self.run_cli(client)
+                self.assertNotIn('private-network-url', str(caught.exception))
+                self.assertEqual(Path('callonly001.json').read_bytes(), b'old-owned-file')
+                self.assertEqual(sorted(p.name for p in Path('.').iterdir()), ['callonly001.json'])
+            finally: os.chdir(previous)
+
+    def test_result_only_validation_precedes_sdk_construction(self):
+        for args in [('bad/category', 'callonly001'), ('category_a', '../private'),
+                ('category_a', 'unsafe\\path'), ('category_a', 'C:drive'), ('category_a', 'line\nend')]:
+            with patch.object(published_client.boto3, 'client') as factory:
+                with self.assertRaises(SystemExit):
+                    published_client.fetch_result_only(*args)
+                factory.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
