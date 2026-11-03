@@ -185,18 +185,21 @@ def _wait_for_result(s3, sqs, results_bucket: str, result_key: str) -> None:
     queue_url = os.environ.get("MAXIMIZER_RESULTS_QUEUE_URL")
     deadline = time.time() + 15 * 60
     out_path = os.path.basename(result_key)
-    if queue_url and os.environ.get("MAXIMIZER_UPLOAD_FUNCTION"):
-        # A completed admitted replay emits no new completion notification.
-        # Read its existing result without taking messages from a shared queue.
+    admitted_queue = bool(queue_url and os.environ.get("MAXIMIZER_UPLOAD_FUNCTION"))
+    def existing_result():
         try:
             s3.head_object(Bucket=results_bucket, Key=result_key)
         except ClientError as error:
-            if error.response.get("Error", {}).get("Code") not in ("404", "NoSuchKey", "NotFound"):
-                raise
-        else:
-            s3.download_file(results_bucket, result_key, out_path)
-            print(f"result ready: {results_bucket}/{result_key} -> {out_path}")
-            return
+            if error.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
+        s3.download_file(results_bucket, result_key, out_path)
+        print(f"result ready: {results_bucket}/{result_key} -> {out_path}")
+        return True
+    # A completed replay emits no new notification. Its result may already
+    # exist, or become available after another consumer takes the first message.
+    if admitted_queue and existing_result():
+        return
     if queue_url:
         print(f"waiting for the file_status notification for {result_key} on {queue_url}")
         while time.time() < deadline:
@@ -209,6 +212,8 @@ def _wait_for_result(s3, sqs, results_bucket: str, result_key: str) -> None:
                 sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
                 print(f"result ready ({status['status']} at {status['message_timestamp']}): "
                       f"{results_bucket}/{result_key} -> {out_path}")
+                return
+            if admitted_queue and existing_result():
                 return
         sys.exit("timed out waiting for the notification — contact Maximizer with the UCID")
     print(f"waiting for {results_bucket}/{result_key}")

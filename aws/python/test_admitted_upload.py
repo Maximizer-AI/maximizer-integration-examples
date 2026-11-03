@@ -224,6 +224,17 @@ class AdmittedResultReplayTests(unittest.TestCase):
         self.sqs.delete_message.assert_called_once_with(
             QueueUrl='https://example.invalid/owned-queue', ReceiptHandle='owned-receipt')
 
+    def test_pending_result_appears_after_consumed_notification_without_second_receive(self):
+        self.s3.head_object.side_effect = [
+            ClientError({'Error': {'Code': '404'}}, 'HeadObject'), {}]
+        self.sqs.receive_message.side_effect = [
+            {'Messages': []}, AssertionError('Existing result must prevent another queue receive')]
+        self.wait()
+        self.assertEqual(self.s3.head_object.call_count, 2)
+        self.sqs.receive_message.assert_called_once()
+        self.s3.download_file.assert_called_once_with('demo-results', 'category_a/demo.json', 'demo.json')
+        self.sqs.delete_message.assert_not_called()
+
     def test_unreadable_result_does_not_consume_or_delete_queue_messages(self):
         self.s3.head_object.side_effect = ClientError({'Error': {'Code': '403'}}, 'HeadObject')
         with self.assertRaises(ClientError):
