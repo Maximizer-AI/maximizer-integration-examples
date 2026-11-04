@@ -1,10 +1,13 @@
 import io
 import json
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.error import URLError
 
+import admitted_upload
 from admitted_upload import AdmittedUploads
 import upload_and_fetch as published_client
 from botocore.exceptions import ClientError
@@ -185,6 +188,80 @@ class AdmittedUploadTests(unittest.TestCase):
         self.assertEqual(self.invoke.invoke.call_count, 1)
         self.client.put.assert_not_called()
         self.s3.upload_file.assert_not_called()
+
+
+class ReservedPartTransportTests(unittest.TestCase):
+    """Real AdmittedUploads.put against a patched urlopen; no network access."""
+    url = 'https://demo-bucket.s3.eu-central-1.amazonaws.com/reserved-part?X-Amz-Signature=private-signature'
+
+    def setUp(self):
+        self.client = AdmittedUploads(Mock(), Mock(), 'configured-upload', 'eu-central-1')
+        sleep = patch('admitted_upload.time.sleep')
+        self.sleep = sleep.start(); self.addCleanup(sleep.stop)
+
+    def test_certificate_verification_failure_names_tls_and_the_fix_without_retrying(self):
+        verification = ssl.SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate')
+        for raised in (URLError(verification), verification):
+            with self.subTest(wrapped=isinstance(raised, URLError)), \
+                    patch('admitted_upload.urlopen', side_effect=raised) as urlopen:
+                with self.assertRaisesRegex(RuntimeError, 'TLS certificate verification failed') as caught:
+                    self.client.put(self.url, b'part-bytes')
+                message = str(caught.exception)
+                self.assertIn('SSL_CERT_FILE', message)
+                self.assertIn('python3 -m certifi', message)
+                self.assertNotIn('three network attempts', message)
+                self.assertNotIn('private-signature', message)
+                self.assertNotIn('reserved-part', message)
+                self.assertEqual(urlopen.call_count, 1)
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertTrue(caught.exception.__suppress_context__)
+        self.sleep.assert_not_called()
+
+    def test_timeouts_and_connection_errors_still_retry_and_name_the_error_class(self):
+        cases = ((URLError(TimeoutError('timed out')), 'TimeoutError'),
+                 (TimeoutError('timed out'), 'TimeoutError'),
+                 (URLError(ConnectionRefusedError(61, 'refused')), 'ConnectionRefusedError'),
+                 (ConnectionResetError(54, 'reset'), 'ConnectionResetError'),
+                 (URLError(ssl.SSLEOFError(8, 'EOF occurred in violation of protocol')), 'SSLEOFError'),
+                 (URLError('unknown url type'), 'URLError'))
+        for raised, name in cases:
+            self.sleep.reset_mock()
+            with self.subTest(name=name), patch('admitted_upload.urlopen', side_effect=raised) as urlopen:
+                with self.assertRaisesRegex(RuntimeError, r'after three network attempts \(' + name + r'\)') as caught:
+                    self.client.put(self.url, b'part-bytes')
+                self.assertNotIn('TLS', str(caught.exception))
+                self.assertNotIn('private-signature', str(caught.exception))
+                self.assertEqual(urlopen.call_count, 3)
+                self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [1, 2])
+
+    def test_parts_are_sent_with_the_verifying_context_built_from_certifi(self):
+        context, bundle = Mock(spec=ssl.SSLContext), Mock(where=Mock(return_value='/placeholder/cacert.pem'))
+        with patch('admitted_upload.ssl.create_default_context', return_value=context) as factory, \
+                patch('admitted_upload.certifi', bundle):
+            client = AdmittedUploads(Mock(), Mock(), 'configured-upload', 'eu-central-1')
+        factory.assert_called_once_with()
+        context.load_verify_locations.assert_called_once_with(cafile='/placeholder/cacert.pem')
+        with patch('admitted_upload.urlopen') as urlopen:
+            urlopen.return_value.__enter__.return_value.headers = {'ETag': '"' + 'a' * 32 + '"'}
+            self.assertEqual(client.put(self.url, b'part-bytes'), '"' + 'a' * 32 + '"')
+        self.assertIs(urlopen.call_args.kwargs['context'], context)
+        self.assertEqual(urlopen.call_args.kwargs['timeout'], 45)
+        self.assertEqual(urlopen.call_args.args[0].get_method(), 'PUT')
+
+    def test_context_without_certifi_keeps_default_verification(self):
+        with patch('admitted_upload.certifi', None):
+            context = admitted_upload.transfer_tls_context()
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
+    def test_real_context_verifies_and_loads_certifi_when_installed(self):
+        context = self.client.tls_context
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        if admitted_upload.certifi is not None:
+            self.assertTrue(context.get_ca_certs(), 'certifi bundle was not loaded')
 
 
 class AdmittedResultReplayTests(unittest.TestCase):

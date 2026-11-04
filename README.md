@@ -245,6 +245,14 @@ reservation. Restarting the exact same command and unchanged file resumes a
 valid reserved transfer. If the service already confirmed completion, the
 command skips the file transfer.
 
+The Python client sends each reserved part over HTTPS using the interpreter's
+trust store plus the `certifi` bundle when that package is installed, so an
+error naming TLS certificate verification means this Python build has no
+usable CA bundle: install `certifi` (`python3 -m pip install certifi`) or the
+interpreter's certificates, or point `SSL_CERT_FILE` at a CA bundle such as
+the path printed by `python3 -m certifi`. Certificate verification is never
+disabled, and an unverifiable transfer is reported at once instead of retried.
+
 An incomplete reservation lasts 15 minutes. A request that never received a
 transfer reservation may remain unrecoverable after an uncertain service
 failure. Expired or unrecoverable incomplete requests need a fresh UCID; their
